@@ -381,7 +381,7 @@ func TestActiveTabRecyclerWiring(t *testing.T) {
 	}
 }
 
-// The strip's right edge shows the running build ("v2.0.3", muted) so every
+// The strip's right edge shows the running build ("v2.0.4", muted) so every
 // screenshot or bug report identifies the version. The tag must come from the
 // single appVersion source of truth and must never move tab geometry: it
 // paints only into leftover empty space (hit-testing is untouched).

@@ -12,7 +12,9 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/go-toast/toast"
@@ -312,6 +314,34 @@ func initWindowsProcessProtection() {
 		"--js-flags=--expose-gc",
 	}
 	_ = os.Setenv("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", strings.Join(browserArgs, " "))
+}
+
+// childTrimInterval is the minimum time between two WebView2 child
+// working-set trims. The page asks for a trim after just 5 s hidden, but
+// trimming on every alt-tab would thrash: each trim drops ~800 MB of mapped
+// cache/IndexedDB pages, and showing the window again faults them all back
+// (a Manager CPU + disk-read spike on every switch). Throttling to 10 min
+// keeps the benefit for genuinely-away periods while rapid window switching
+// stays spike-free. Seeded at startup so a fresh boot never trims.
+const childTrimInterval = 10 * time.Minute
+
+var (
+	childTrimMu   sync.Mutex
+	lastChildTrim = time.Now()
+)
+
+// maybeTrimWebView2Children runs trimWebView2WorkingSets at most once per
+// childTrimInterval. Returns how many children were trimmed (0 when the call
+// was throttled away). Safe from any thread.
+func maybeTrimWebView2Children() int {
+	childTrimMu.Lock()
+	if time.Since(lastChildTrim) < childTrimInterval {
+		childTrimMu.Unlock()
+		return 0
+	}
+	lastChildTrim = time.Now()
+	childTrimMu.Unlock()
+	return trimWebView2WorkingSets()
 }
 
 // processEntry mirrors the Win32 PROCESSENTRY32W layout. Field offsets are
@@ -738,11 +768,12 @@ func setupProfileBindings(w webview2.WebView, ctx *profileViewContext) {
 		curProc, _, _ := procGetCurrentProcess.Call()
 		procSetProcessWorkingSetSize.Call(curProc, ^uintptr(0), ^uintptr(0))
 		// The Go process is only ~2 MB; the gigabytes live in the WebView2
-		// child processes (renderer/GPU/utility). Trim their working sets too:
-		// pages freed by the page-side window.gc() leave the working set
-		// immediately instead of waiting for OS paging. Non-destructive —
-		// trimmed pages fault back from standby on next use.
-		trimmed := trimWebView2WorkingSets()
+		// child processes (renderer/GPU/utility). Trim their working sets too,
+		// throttled (see childTrimInterval): pages freed by the page-side
+		// window.gc() leave the working set immediately instead of waiting
+		// for OS paging. Non-destructive — trimmed pages fault back from
+		// standby on next use.
+		trimmed := maybeTrimWebView2Children()
 		cacheDebugLog("release-memory: trimmed %d WebView2 child working sets", trimmed)
 		debugLogProcessStats("release-memory")
 		enforceDiskCacheCapFrom(

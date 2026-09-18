@@ -2,7 +2,11 @@
 
 package main
 
-import "testing"
+import (
+	"os"
+	"strings"
+	"testing"
+)
 
 // The working-set trim must only ever touch our own WebView2 children:
 // direct msedgewebview2.exe descendants of this process. Anything else
@@ -35,5 +39,26 @@ func TestChildWebView2PIDsFiltersCorrectly(t *testing.T) {
 func TestChildWebView2PIDsEmpty(t *testing.T) {
 	if got := childWebView2PIDs(nil, 1234); len(got) != 0 {
 		t.Fatalf("expected no PIDs for empty input, got %v", got)
+	}
+}
+
+// Trimming every 5-second hide would thrash on each alt-tab (trim ~800 MB,
+// then fault it all back on show: a Manager CPU + disk spike per switch).
+// The child trim must stay throttled to a multi-minute interval and seeded
+// at startup, so rapid window switching never triggers it.
+func TestChildTrimThrottleWiring(t *testing.T) {
+	src, err := os.ReadFile("app_windows.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"childTrimInterval = 10 * time.Minute",
+		"lastChildTrim = time.Now()",
+		"maybeTrimWebView2Children()",
+		"time.Since(lastChildTrim) < childTrimInterval",
+	} {
+		if !strings.Contains(string(src), want) {
+			t.Errorf("child trim throttle is missing %q", want)
+		}
 	}
 }

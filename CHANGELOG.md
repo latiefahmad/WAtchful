@@ -9,6 +9,18 @@ for the tagged version to GitHub **verbatim** as the release notes. Conventions:
 - Everything under the heading until the next `## [` heading is published as-is.
 - Write for end users: what is new, what is fixed, and which file to download.
 
+## [v2.0.4] - 2026-09-18
+
+### 🛠 Fixed
+
+- **Renderer trim throttled to once per 10 minutes** — v2.0.3 trimmed the WebView2 child working sets on every hide longer than 5 seconds, so each alt-tab dropped ~800 MB of mapped cache pages and faulted them all back on return (a Manager CPU + disk-read spike per switch, verified head-to-head against upstream). The trim now runs at most once per 10 minutes, seeded at startup: rapid window switching stays spike-free while genuinely-away periods still get the memory back.
+
+### 🔄 Updating
+
+Updates arrive automatically in-app: WAtchful checks for new releases shortly after startup and every 4 hours, then downloads, installs, and restarts itself — you only approve. Accept the banner when it appears, or download the file for your platform from this release manually.
+
+**Full Changelog**: https://github.com/latiefahmad/WAtchful/compare/v2.0.3...v2.0.4
+
 ## [v2.0.3] - 2026-09-18
 
 ### ⚡ Memory

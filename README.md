@@ -24,7 +24,7 @@ The screenshots use blurred chat content to protect personal information.
 
 **[Download the latest release →](https://github.com/latiefahmad/WAtchful/releases/latest)** — the page detects your OS and highlights the right file.
 
-Latest published release: **v2.0.3** ([release notes](https://github.com/latiefahmad/WAtchful/releases/tag/v2.0.3))
+Latest published release: **v2.0.4** ([release notes](https://github.com/latiefahmad/WAtchful/releases/tag/v2.0.4))
 
 | Platform | Download |
 | --- | --- |
@@ -107,6 +107,10 @@ Default data locations (settings, profile registry, logs):
 - Linux: `~/.config/WAtchful/`
 
 Inside, the Default profile keeps its session in `UserData/`, and every other profile gets an isolated folder under `Profiles/<profile>/`. Installs upgraded from older versions keep using their existing `WhatsAppDesk/` folder, so no session is lost.
+
+## Version 2.0.4
+
+- The WebView2 child working-set trim now runs at most once per 10 minutes, so alt-tabbing no longer causes a CPU + disk spike on every switch — verified flat head-to-head against upstream.
 
 ## Version 2.0.3
 

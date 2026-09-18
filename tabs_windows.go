@@ -1353,7 +1353,7 @@ type tabMetrics struct {
 	badgeH int32
 	badgeY int32
 	// verW reserves the right-edge slot for the muted build-version tag
-	// ("v2.0.3") so bug-report screenshots always show the running build.
+	// ("v2.0.4") so bug-report screenshots always show the running build.
 	verW int32
 }
 
@@ -1595,7 +1595,7 @@ func (m *tabShell) paintStrip() {
 				uintptr(unsafe.Pointer(&lr)), uintptr(tabDTCenter|tabDTSingle|tabDTVCenter|tabDTNoPrefix))
 		}
 	}
-	// Build-version tag at the strip's right edge ("v2.0.3", muted): every
+	// Build-version tag at the strip's right edge ("v2.0.4", muted): every
 	// screenshot or bug report then shows which build is running. Tab
 	// geometry is deliberately untouched (hit-testing keeps working exactly
 	// as before), so the tag only paints into leftover empty space and is
