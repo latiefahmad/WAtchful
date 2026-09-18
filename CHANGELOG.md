@@ -9,6 +9,19 @@ for the tagged version to GitHub **verbatim** as the release notes. Conventions:
 - Everything under the heading until the next `## [` heading is published as-is.
 - Write for end users: what is new, what is fixed, and which file to download.
 
+## [v2.0.2] - 2026-09-18
+
+### ⚡ Memory
+
+- **Active-tab recycler now runs every 90 minutes (was 6 hours)** — follow-up to v2.0.1: on a live single-account session the WhatsApp Web renderer still climbs to ~1 GB after about an hour of use, and single-tab setups never hibernate, so a 6-hour cycle left the high baseline in place all day. The rebuild is unchanged (same controller close/reopen path, login kept on disk, tab position kept, ~100–150 MB after refresh) and still waits when a download is in flight or a document preview is open.
+- **Leaner Chromium engine flags (Windows)** — the WebView2 engine no longer loads unused media-key/media-session services or built-in component-extension background pages, and `window.gc()` is now actually exposed to the page so hiding the window triggers a real JS heap collection instead of a no-op.
+
+### 🔄 Updating
+
+Updates arrive automatically in-app: WAtchful checks for new releases shortly after startup and every 4 hours, then downloads, installs, and restarts itself — you only approve. Accept the banner when it appears, or download the file for your platform from this release manually.
+
+**Full Changelog**: https://github.com/latiefahmad/WAtchful/compare/v2.0.1...v2.0.2
+
 ## [v2.0.1] - 2026-09-18
 
 ### ⚡ Memory

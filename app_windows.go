@@ -291,15 +291,21 @@ func initWindowsProcessProtection() {
 	}
 
 	// 2. Configure safe WebView2 / Chromium engine arguments:
-	// Use only reliable, well-tested flags. Avoid nested quotes in --js-flags and
-	// do NOT disable window occlusion or GPU shader cache, which cause
-	// black screen / compositor initialization failures on Windows 10 & 11.
+	// Use only reliable, well-tested flags. Keep --js-flags a single token
+	// (no spaces/nested quotes) and do NOT disable window occlusion or GPU
+	// shader cache, which cause black screen / compositor initialization
+	// failures on Windows 10 & 11.
 	browserArgs := []string{
-		"--disable-features=Translate,MediaRouter",
+		"--disable-features=Translate,MediaRouter,HardwareMediaKeyHandling,MediaSessionService",
 		"--disable-background-networking",
 		"--disable-component-update",
+		"--disable-component-extensions-with-background-pages",
 		"--disable-domain-reliability",
 		"--disable-sync",
+		// Exposes window.gc() so the page's visibilitychange handler can
+		// actually force a JS heap collection when hidden (without this
+		// flag that call is a no-op and the heap only grows).
+		"--js-flags=--expose-gc",
 	}
 	_ = os.Setenv("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", strings.Join(browserArgs, " "))
 }

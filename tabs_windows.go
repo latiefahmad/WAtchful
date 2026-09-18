@@ -129,13 +129,15 @@ const (
 
 	// tabRecycleAge is how long the ACTIVE tab's page may run before the
 	// recycler rebuilds its renderer in place. WhatsApp Web's renderer
-	// baseline climbs with usage (measured: ~0.7–0.9 GB after an hour of
-	// active use — not a linear leak, just heap/DOM/decoded-media the page
-	// never returns) and no in-page GC gives it back. A fresh renderer
-	// resumes at ~100–150 MB. The rebuild reuses the hibernate wake path:
-	// the session lives on disk, the login persists, and the tab keeps its
-	// strip position; the page reload is invisible unless you watch RAM.
-	tabRecycleAge = 6 * time.Hour
+	// baseline climbs with usage (measured: ~0.7–1.0 GB after an hour of
+	// active use on a single account — not a linear leak, just heap/DOM/
+	// decoded-media the page never returns) and no in-page GC gives it back.
+	// A fresh renderer resumes at ~100–150 MB. The rebuild reuses the
+	// hibernate wake path: the session lives on disk, the login persists,
+	// and the tab keeps its strip position; the page reload is invisible
+	// unless you watch RAM. Kept at 90 min so a single-account setup (which
+	// never hibernates) also gets its memory back without a manual refresh.
+	tabRecycleAge = 90 * time.Minute
 
 	// tabRecycleProbeEvery throttles the page-busy probe: while a rebuild is
 	// pending, ask the page at most once per minute instead of once per
@@ -1740,7 +1742,7 @@ func (m *tabShell) setProfileBusyState(profileID, kind string, on bool) {
 
 // recycleActiveLocked rebuilds the active tab's engine in place once its
 // page has run long enough for WhatsApp Web's renderer baseline to bloat
-// (~0.7–0.9 GB; see tabRecycleAge). The rebuild is the same controller
+// (~0.7–1.0 GB; see tabRecycleAge). The rebuild is the same controller
 // close/reopen the hibernate wake path uses: session on disk, login kept,
 // strip position unchanged. Deferred while the page reports downloads or
 // an open document preview — a pending rebuild is retried on later sweeps.

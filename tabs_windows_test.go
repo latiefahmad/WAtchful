@@ -320,7 +320,7 @@ func TestTabStabilityPins(t *testing.T) {
 }
 
 // The active-tab renderer recycler: WhatsApp Web's renderer baseline climbs
-// to ~0.7–0.9 GB after an hour of use and the page never returns it, so the
+// to ~0.7–1.0 GB after an hour of use and the page never returns it, so the
 // shell rebuilds the engine in place after a long calm period. The rebuild
 // must stay gated on page activity (downloads, open document preview) and
 // reuse the hibernate wake path.
@@ -331,7 +331,7 @@ func TestActiveTabRecyclerWiring(t *testing.T) {
 	}
 	src := string(shell)
 	for _, want := range []string{
-		"tabRecycleAge = 6 * time.Hour",
+		"tabRecycleAge = 90 * time.Minute",
 		"func (m *tabShell) recycleActiveLocked",
 		"m.recycleActiveLocked(now)", // wired into sweepHidden
 		"func (m *tabShell) rebuildActiveTabLocked",
