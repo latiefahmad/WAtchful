@@ -171,6 +171,7 @@ const (
 
 	tabDTLeft     = 0x0000
 	tabDTCenter   = 0x0001
+	tabDTRight    = 0x0002
 	tabDTNoPrefix = 0x0800
 	tabDTEllipsis = 0x00008000
 	tabDTSingle   = 0x0020
@@ -1351,6 +1352,9 @@ type tabMetrics struct {
 	badgeW int32
 	badgeH int32
 	badgeY int32
+	// verW reserves the right-edge slot for the muted build-version tag
+	// ("v2.0.3") so bug-report screenshots always show the running build.
+	verW int32
 }
 
 func (m *tabShell) metrics() tabMetrics {
@@ -1369,6 +1373,7 @@ func (m *tabShell) metrics() tabMetrics {
 		badgeW: m.sc(28),
 		badgeH: m.sc(16),
 		badgeY: m.sc(8),
+		verW:   m.sc(64),
 	}
 }
 
@@ -1589,6 +1594,21 @@ func (m *tabShell) paintStrip() {
 			tabDrawText.Call(hdc, uintptr(unsafe.Pointer(lp)), uintptr(^uintptr(0)),
 				uintptr(unsafe.Pointer(&lr)), uintptr(tabDTCenter|tabDTSingle|tabDTVCenter|tabDTNoPrefix))
 		}
+	}
+	// Build-version tag at the strip's right edge ("v2.0.3", muted): every
+	// screenshot or bug report then shows which build is running. Tab
+	// geometry is deliberately untouched (hit-testing keeps working exactly
+	// as before), so the tag only paints into leftover empty space and is
+	// skipped when tabs fill the strip.
+	tabEnd := mt.pad + int32(n)*(tabW+mt.gap)
+	if area.Right-area.Left-tabEnd >= mt.verW+mt.pad {
+		vp, _ := windows.UTF16PtrFromString("v" + appVersion)
+		var vr tabRect
+		vr.Left, vr.Top, vr.Right, vr.Bottom = area.Right-mt.pad-mt.verW, 0, area.Right-mt.pad, mt.stripH
+		tabSetTextColor.Call(hdc, muted)
+		tabSelectObject.Call(hdc, m.fontText)
+		tabDrawText.Call(hdc, uintptr(unsafe.Pointer(vp)), uintptr(^uintptr(0)),
+			uintptr(unsafe.Pointer(&vr)), uintptr(tabDTRight|tabDTSingle|tabDTVCenter|tabDTNoPrefix))
 	}
 	if hibPen != 0 {
 		tabDeleteObject.Call(hibPen)

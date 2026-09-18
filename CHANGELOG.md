@@ -9,6 +9,22 @@ for the tagged version to GitHub **verbatim** as the release notes. Conventions:
 - Everything under the heading until the next `## [` heading is published as-is.
 - Write for end users: what is new, what is fixed, and which file to download.
 
+## [v2.0.3] - 2026-09-18
+
+### ⚡ Memory
+
+- **Working-set trim now reaches the WebView2 child processes** — `releaseMemoryNative` previously trimmed only the ~2 MB Go process while the gigabytes sat in the renderer/GPU/utility children. When the window stays hidden for 5 seconds, the app now also drops every one of its own `msedgewebview2.exe` children's working sets to minimum (pages freed by the page-side `window.gc()` leave RAM immediately instead of waiting for OS paging). Non-destructive: trimmed pages fault back from standby on next use, and unrelated Edge instances are never touched.
+
+### ✨ Interface
+
+- **Running build shown on the tab strip** — the strip's right edge now carries a muted `v2.0.3` tag, so every screenshot or bug report identifies the exact build. Tab layout and click hit-testing are untouched: the tag only paints into leftover empty space.
+
+### 🔄 Updating
+
+Updates arrive automatically in-app: WAtchful checks for new releases shortly after startup and every 4 hours, then downloads, installs, and restarts itself — you only approve. Accept the banner when it appears, or download the file for your platform from this release manually.
+
+**Full Changelog**: https://github.com/latiefahmad/WAtchful/compare/v2.0.2...v2.0.3
+
 ## [v2.0.2] - 2026-09-18
 
 ### ⚡ Memory

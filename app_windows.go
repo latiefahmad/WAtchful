@@ -48,6 +48,10 @@ var (
 	procAssignProcessToJobObject = kernel32.NewProc("AssignProcessToJobObject")
 	procSetProcessWorkingSetSize = kernel32.NewProc("SetProcessWorkingSetSize")
 	procGetCurrentProcess        = kernel32.NewProc("GetCurrentProcess")
+	procCreateToolhelpSnapshot   = kernel32.NewProc("CreateToolhelp32Snapshot")
+	procProcess32First           = kernel32.NewProc("Process32FirstW")
+	procProcess32Next            = kernel32.NewProc("Process32NextW")
+	procOpenProcess              = kernel32.NewProc("OpenProcess")
 
 	isAlwaysOnTopWin = false
 )
@@ -308,6 +312,96 @@ func initWindowsProcessProtection() {
 		"--js-flags=--expose-gc",
 	}
 	_ = os.Setenv("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", strings.Join(browserArgs, " "))
+}
+
+// processEntry mirrors the Win32 PROCESSENTRY32W layout. Field offsets are
+// resolved with unsafe.Offsetof at the call site, so the walk stays correct
+// on both 32- and 64-bit builds.
+type processEntry struct {
+	Size            uint32
+	Usage           uint32
+	ProcessID       uint32
+	DefaultHeapID   uintptr
+	ModuleID        uint32
+	Threads         uint32
+	ParentProcessID uint32
+	PriClassBase    int32
+	Flags           uint32
+	ExeFile         [260]uint16
+}
+
+// procIdentity is the syscall-free view of one process used for filtering.
+type procIdentity struct {
+	pid  uint32
+	ppid uint32
+	exe  string
+}
+
+// childWebView2PIDs returns the PIDs of live msedgewebview2.exe processes
+// parented by selfPID. Pure (no syscalls) so it stays unit-testable; only
+// direct children are ever matched, never unrelated Edge instances.
+func childWebView2PIDs(procs []procIdentity, selfPID uint32) []uint32 {
+	var out []uint32
+	for _, p := range procs {
+		if p.pid == 0 || p.pid == selfPID || p.ppid != selfPID {
+			continue
+		}
+		if !strings.EqualFold(p.exe, "msedgewebview2.exe") {
+			continue
+		}
+		out = append(out, p.pid)
+	}
+	return out
+}
+
+func listChildWebView2PIDs() []uint32 {
+	const TH32CS_SNAPPROCESS = 0x00000002
+	snap, _, _ := procCreateToolhelpSnapshot.Call(uintptr(TH32CS_SNAPPROCESS), 0)
+	if snap == ^uintptr(0) { // INVALID_HANDLE_VALUE
+		return nil
+	}
+	defer procCloseHandle.Call(snap)
+	self := uint32(os.Getpid())
+	var procs []procIdentity
+	var entry processEntry
+	entry.Size = uint32(unsafe.Sizeof(entry))
+	ret, _, _ := procProcess32First.Call(snap, uintptr(unsafe.Pointer(&entry)))
+	for ret != 0 {
+		procs = append(procs, procIdentity{
+			pid:  entry.ProcessID,
+			ppid: entry.ParentProcessID,
+			exe:  windows.UTF16ToString(entry.ExeFile[:]),
+		})
+		ret, _, _ = procProcess32Next.Call(snap, uintptr(unsafe.Pointer(&entry)))
+	}
+	return childWebView2PIDs(procs, self)
+}
+
+// trimWebView2WorkingSets drops every WebView2 child process's working set to
+// its minimum via SetProcessWorkingSetSize(-1, -1). Trimmed pages move to the
+// standby list and fault back transparently on next use — no process is
+// suspended, terminated, or otherwise disturbed. Every failure (snapshot,
+// open, quota) is ignored: the worst case is a no-op. Returns how many
+// children were actually trimmed, for debug logging.
+func trimWebView2WorkingSets() int {
+	const (
+		PROCESS_SET_QUOTA                 = 0x00000100
+		PROCESS_QUERY_LIMITED_INFORMATION = 0x00001000
+	)
+	trimmed := 0
+	for _, pid := range listChildWebView2PIDs() {
+		h, _, _ := procOpenProcess.Call(
+			uintptr(PROCESS_SET_QUOTA|PROCESS_QUERY_LIMITED_INFORMATION), 0, uintptr(pid))
+		if h == 0 {
+			continue
+		}
+		r, _, _ := procSetProcessWorkingSetSize.Call(h, ^uintptr(0), ^uintptr(0))
+		procCloseHandle.Call(h)
+		if r != 0 {
+			trimmed++
+		}
+	}
+	return trimmed
 }
 
 type RECT struct {
@@ -643,6 +737,13 @@ func setupProfileBindings(w webview2.WebView, ctx *profileViewContext) {
 		debug.FreeOSMemory()
 		curProc, _, _ := procGetCurrentProcess.Call()
 		procSetProcessWorkingSetSize.Call(curProc, ^uintptr(0), ^uintptr(0))
+		// The Go process is only ~2 MB; the gigabytes live in the WebView2
+		// child processes (renderer/GPU/utility). Trim their working sets too:
+		// pages freed by the page-side window.gc() leave the working set
+		// immediately instead of waiting for OS paging. Non-destructive —
+		// trimmed pages fault back from standby on next use.
+		trimmed := trimWebView2WorkingSets()
+		cacheDebugLog("release-memory: trimmed %d WebView2 child working sets", trimmed)
 		debugLogProcessStats("release-memory")
 		enforceDiskCacheCapFrom(
 			[]string{filepath.Join(ctx.userDataDir, "EBWebView")},
