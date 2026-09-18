@@ -11,7 +11,7 @@ package main
 #import <PDFKit/PDFKit.h>
 #include <stdlib.h>
 
-// Go export (defined in app_darwin.go) used by the Profiles menus.
+// Go export (defined in export_darwin.go) used by the Profiles menus.
 extern void WAtchfulSwitchProfile(char* name);
 
 // Provided by the vendored webview library (webview.h): selects the
@@ -989,15 +989,6 @@ import (
 )
 
 const userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
-
-// WAtchfulSwitchProfile is exported to Objective-C (Go export; see the
-// extern declaration in the cgo preamble) and relaunches the app into the
-// chosen profile when it is picked from the tray/menubar Profiles submenu.
-//
-//export WAtchfulSwitchProfile
-func WAtchfulSwitchProfile(name *C.char) {
-	switchToProfileByName(C.GoString(name))
-}
 
 func getUserDataDir() string {
 	// Multi-profile: per-profile support home (app icon, window state, lock).
