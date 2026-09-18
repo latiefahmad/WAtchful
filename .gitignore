@@ -1,0 +1,41 @@
+WhatsApp.exe
+WhatsAppDesk.exe
+WhatsAppDesktopLight.exe
+whatsapp-desktop.exe
+*.exe
+*.exe~
+WhatsApp.exe~
+WhatsApp_*
+WAtchful.exe
+Watchful_*
+icon_1024.png
+*.app
+!AppIcon.icns
+*.dmg
+*.zip
+*.tmp
+*.log
+dmg_background.png
+whatsapp-desktop
+
+# Generated build output and local tooling state
+*.rpm
+*.deb
+dist_linux*/
+rpms*/
+.gocache/
+.video_agent/
+build/
+scripts/node_modules/
+
+# Internal project documentation & state
+MEMORY.md
+DESIGN.md
+PRODUCT.md
+.impeccable/
+.freebuff/
+.smoke-data/
+
+# Local-only (never publish)
+BENCHMARK_RESULTS.md
+WhatsAppDesk.entitlements

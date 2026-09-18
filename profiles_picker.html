@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WAtchful — Profiles</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: #0b141a;
+    color: #e9edef;
+    display: flex; align-items: center; justify-content: center;
+    padding: 20px;
+  }
+  .card {
+    width: 460px; max-width: 100%;
+    background: #111b21;
+    border: 1px solid #222f36;
+    border-radius: 12px;
+    box-shadow: 0 24px 60px rgba(0,0,0,.55);
+    overflow: hidden;
+  }
+  header {
+    padding: 18px 20px 14px;
+    border-bottom: 1px solid #222f36;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #00a884; flex: none; }
+  header h1 { font-size: 15px; font-weight: 600; }
+  header .sub { display: block; font-size: 11px; color: #8696a0; font-weight: 400; margin-top: 2px; }
+  .list { max-height: 46vh; overflow-y: auto; padding: 8px; }
+  .profile {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px; border-radius: 8px; cursor: pointer;
+    border: 1px solid transparent;
+  }
+  .profile:hover { background: #202c33; }
+  .profile:focus-visible { outline: 2px solid #00a884; outline-offset: 1px; }
+  .avatar {
+    width: 40px; height: 40px; border-radius: 50%; flex: none;
+    background: #00a884; color: #111b21;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 16px;
+  }
+  .meta { min-width: 0; flex: 1; }
+  .meta .name { font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .meta .info { font-size: 11px; color: #8696a0; margin-top: 2px; }
+  .badge {
+    font-size: 10px; font-weight: 600; color: #00a884;
+    border: 1px solid #00a884; border-radius: 4px; padding: 1px 5px; flex: none;
+  }
+  .iconbtn {
+    background: transparent; border: none; color: #8696a0; cursor: pointer;
+    font-size: 14px; padding: 6px; border-radius: 6px; flex: none; line-height: 1;
+  }
+  .iconbtn:hover { background: #2a3942; color: #e9edef; }
+  .newbar {
+    display: flex; gap: 8px;
+    padding: 12px 14px; border-top: 1px solid #222f36;
+  }
+  .newbar input {
+    flex: 1; min-width: 0;
+    background: #202c33; border: 1px solid #2a3942; border-radius: 8px;
+    color: #e9edef; padding: 9px 12px; font-size: 13px; outline: none;
+  }
+  .newbar input:focus { border-color: #00a884; }
+  .newbar button {
+    background: #00a884; color: #111b21; border: none; border-radius: 8px;
+    padding: 9px 16px; font-size: 12.5px; font-weight: 700; cursor: pointer;
+  }
+  .newbar button:hover { background: #017561; }
+  .newbar button:disabled { opacity: .5; cursor: default; }
+  footer {
+    padding: 10px 14px 14px; border-top: 1px solid #222f36;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  footer .hint { font-size: 11px; color: #8696a0; }
+  footer .quit {
+    background: transparent; border: none; color: #8696a0; font-size: 12px; cursor: pointer;
+    text-decoration: underline; padding: 4px;
+  }
+  footer .quit:hover { color: #e9edef; }
+  .toast {
+    position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
+    background: #2a3942; color: #e9edef; border-radius: 8px; padding: 9px 16px;
+    font-size: 12.5px; box-shadow: 0 8px 24px rgba(0,0,0,.5);
+    opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 10;
+  }
+  .toast.show { opacity: 1; }
+  .empty { padding: 28px 16px; text-align: center; color: #8696a0; font-size: 12.5px; }
+  dialog.rename {
+    background: #202c33; color: #e9edef; border: 1px solid #2a3942;
+    border-radius: 10px; padding: 18px; width: 320px;
+  }
+  dialog.rename::backdrop { background: rgba(0,0,0,.6); }
+  dialog.rename input {
+    width: 100%; background: #111b21; border: 1px solid #2a3942; border-radius: 8px;
+    color: #e9edef; padding: 9px 12px; font-size: 13px; outline: none; margin: 10px 0 14px;
+  }
+  dialog.rename .row { display: flex; gap: 8px; justify-content: flex-end; }
+  dialog.rename button {
+    border: none; border-radius: 6px; padding: 7px 14px; font-size: 12px;
+    font-weight: 600; cursor: pointer;
+  }
+  dialog.rename .save { background: #00a884; color: #111b21; }
+  dialog.rename .cancel { background: transparent; color: #8696a0; }
+</style>
+</head>
+<body>
+  <section class="card" role="dialog" aria-modal="true" aria-labelledby="picker-title">
+    <header>
+      <span class="dot"></span>
+      <div>
+        <h1 id="picker-title">Choose a profile</h1>
+        <span class="sub">Each profile keeps its own logged-in WhatsApp account</span>
+      </div>
+    </header>
+
+    <div class="list" id="list" role="listbox" aria-label="Profiles"></div>
+
+    <div class="newbar">
+      <input id="new-name" type="text" maxlength="40" placeholder="New profile name (e.g. Work, Personal)…" aria-label="New profile name">
+      <button id="btn-create" type="button">＋ Create</button>
+    </div>
+
+    <footer>
+      <span class="hint">Tip: launch with <code>--profile &lt;name&gt;</code> to skip this screen</span>
+      <button class="quit" id="btn-quit" type="button">Quit</button>
+    </footer>
+  </section>
+
+  <dialog class="rename" id="rename-dialog">
+    <strong style="font-size:13px">Rename profile</strong>
+    <input id="rename-input" type="text" maxlength="40" aria-label="Profile name">
+    <div class="row">
+      <button class="cancel" id="rename-cancel" type="button">Cancel</button>
+      <button class="save" id="rename-save" type="button">Save</button>
+    </div>
+  </dialog>
+
+  <div class="toast" id="toast"></div>
+
+<script>
+  var DATA = __WA_PROFILE_DATA__;
+  var activeID = (DATA.active && DATA.active.id) || '';
+  var listEl = document.getElementById('list');
+  var toastEl = document.getElementById('toast');
+  var renameTarget = '';
+
+  function toast(msg) {
+    toastEl.textContent = msg;
+    toastEl.classList.add('show');
+    setTimeout(function() { toastEl.classList.remove('show'); }, 2200);
+  }
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function(c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  function initials(name) {
+    var parts = String(name || '?').trim().split(/\s+/);
+    var s = parts.length > 1 ? parts[0][0] + parts[parts.length - 1][0] : String(name || '?').slice(0, 2);
+    return s.toUpperCase();
+  }
+
+  function lastUsedLabel(ts) {
+    if (!ts) return 'Not opened yet';
+    var diff = Math.floor(Date.now() / 1000) - ts;
+    if (diff < 60) return 'Opened just now';
+    if (diff < 3600) return 'Opened ' + Math.floor(diff / 60) + ' min ago';
+    if (diff < 86400) return 'Opened ' + Math.floor(diff / 3600) + ' h ago';
+    return 'Opened ' + Math.floor(diff / 86400) + ' d ago';
+  }
+
+  function sizeLabel(bytes) {
+    var n = Number(bytes) || 0;
+    if (n < 1024) return n + ' B';
+    var units = ['KB', 'MB', 'GB', 'TB'];
+    var v = n;
+    var i = -1;
+    do { v /= 1024; i++; } while (v >= 1024 && i < units.length - 1);
+    return v.toFixed(1) + ' ' + units[i];
+  }
+
+  function render() {
+    var profiles = DATA.profiles || [];
+    profiles.sort(function(a, b) {
+      if (a.id === 'default') return -1;
+      if (b.id === 'default') return 1;
+      return (b.last_used || 0) - (a.last_used || 0);
+    });
+    if (!profiles.length) {
+      listEl.innerHTML = '<div class="empty">No profiles yet — create one below.</div>';
+      return;
+    }
+    listEl.innerHTML = profiles.map(function(p) {
+      return '<div class="profile" role="option" tabindex="0" data-id="' + esc(p.id) + '" data-name="' + esc(p.name) + '" aria-label="Open profile ' + esc(p.name) + '">' +
+        '<span class="avatar">' + esc(initials(p.name)) + '</span>' +
+        '<span class="meta">' +
+          '<span class="name">' + esc(p.name) + '</span>' +
+          '<span class="info">' + lastUsedLabel(p.last_used) + ' · ' + sizeLabel(p.data_bytes) + '</span>' +
+        '</span>' +
+        (p.id === activeID ? '<span class="badge">CURRENT</span>' : '') +
+        (p.id === activeID ? '' : '<button class="iconbtn" data-reset="' + esc(p.id) + '" data-reset-name="' + esc(p.name) + '" title="Reset session data (logs this account out)" aria-label="Reset data for ' + esc(p.name) + '">♻️</button>') +
+        '<button class="iconbtn" data-rename="' + esc(p.id) + '" data-rename-name="' + esc(p.name) + '" title="Rename" aria-label="Rename ' + esc(p.name) + '">✏️</button>' +
+        (p.id === 'default' ? '' : '<button class="iconbtn" data-delete="' + esc(p.id) + '" data-delete-name="' + esc(p.name) + '" title="Delete" aria-label="Delete ' + esc(p.name) + '">🗑️</button>') +
+      '</div>';
+    }).join('');
+  }
+
+  function launch(id) {
+    if (!window.pickerLaunchNative) return;
+    listEl.style.pointerEvents = 'none';
+    var r = window.pickerLaunchNative(id);
+    if (r && typeof r.then === 'function') { r.then(function() {}, function() {}); }
+    setTimeout(function() { listEl.style.pointerEvents = ''; }, 4000);
+  }
+
+  listEl.addEventListener('click', function(e) {
+    var renameBtn = e.target.closest ? e.target.closest('[data-rename]') : null;
+    if (renameBtn) {
+      renameTarget = renameBtn.getAttribute('data-rename');
+      var input = document.getElementById('rename-input');
+      input.value = renameBtn.getAttribute('data-rename-name') || '';
+      document.getElementById('rename-dialog').showModal();
+      input.focus();
+      return;
+    }
+    var resetBtn = e.target.closest ? e.target.closest('[data-reset]') : null;
+    if (resetBtn) {
+      // Inline two-step confirm: no window.confirm needed (WKWebView builds
+      // do not display native script dialogs).
+      if (resetBtn.dataset.armed !== '1') {
+        resetBtn.dataset.armed = '1';
+        resetBtn.textContent = '⚠️';
+        resetBtn.title = 'Click again to reset session data';
+        setTimeout(function() {
+          if (resetBtn.isConnected) { resetBtn.dataset.armed = ''; resetBtn.textContent = '♻️'; }
+        }, 3000);
+        return;
+      }
+      var rid = resetBtn.getAttribute('data-reset');
+      var rname = resetBtn.getAttribute('data-reset-name');
+      resetBtn.disabled = true;
+      if (window.pickerResetNative) {
+        var rr = window.pickerResetNative(rid);
+        Promise.resolve(rr).then(function(res) {
+          if (res === false) {
+            toast('Could not reset this profile (it may be in use).');
+            return;
+          }
+          for (var i = 0; i < DATA.profiles.length; i++) {
+            if (DATA.profiles[i].id === rid) DATA.profiles[i].data_bytes = 0;
+          }
+          render();
+          toast('Session data cleared for "' + rname + '".');
+        }).catch(function() { resetBtn.disabled = false; });
+      } else {
+        resetBtn.disabled = false;
+      }
+      return;
+    }
+    var deleteBtn = e.target.closest ? e.target.closest('[data-delete]') : null;
+    if (deleteBtn) {
+      var id = deleteBtn.getAttribute('data-delete');
+      var name = deleteBtn.getAttribute('data-delete-name');
+      if (window.confirm('Delete profile "' + name + '"?\n\nIts WhatsApp session, cookies and stored data will be removed from this computer.')) {
+        var ok = window.pickerDeleteNative && window.pickerDeleteNative(id);
+        if (ok && ok.then) {
+          ok.then(function(res) { if (res === false) { toast('Could not delete this profile (it may be in use).'); } else { removeLocal(id); } });
+        } else if (ok === false) {
+          toast('Could not delete this profile (it may be in use).');
+        } else {
+          removeLocal(id);
+        }
+      }
+      return;
+    }
+    var row = e.target.closest ? e.target.closest('.profile') : null;
+    if (row) launch(row.getAttribute('data-id'));
+  });
+
+  listEl.addEventListener('keydown', function(e) {
+    if ((e.key === 'Enter' || e.key === ' ') && e.target.classList && e.target.classList.contains('profile')) {
+      e.preventDefault();
+      launch(e.target.getAttribute('data-id'));
+    }
+  });
+
+  function removeLocal(id) {
+    DATA.profiles = (DATA.profiles || []).filter(function(p) { return p.id !== id; });
+    render();
+    toast('Profile deleted.');
+  }
+
+  function createProfile() {
+    var input = document.getElementById('new-name');
+    var name = (input.value || '').trim();
+    if (!name) { input.focus(); return; }
+    var btn = document.getElementById('btn-create');
+    btn.disabled = true;
+    if (window.pickerCreateNative) {
+      var r = window.pickerCreateNative(name);
+      if (r && r.then) r.then(function() {}, function() {});
+    }
+    setTimeout(function() { btn.disabled = false; }, 4000);
+  }
+  document.getElementById('btn-create').addEventListener('click', createProfile);
+  document.getElementById('new-name').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') createProfile();
+  });
+
+  document.getElementById('rename-cancel').addEventListener('click', function() {
+    document.getElementById('rename-dialog').close();
+  });
+  document.getElementById('rename-save').addEventListener('click', function() {
+    var name = (document.getElementById('rename-input').value || '').trim();
+    if (name && renameTarget && window.pickerRenameNative) {
+      window.pickerRenameNative(renameTarget, name);
+      for (var i = 0; i < DATA.profiles.length; i++) {
+        if (DATA.profiles[i].id === renameTarget) DATA.profiles[i].name = name;
+      }
+      render();
+    }
+    document.getElementById('rename-dialog').close();
+  });
+
+  document.getElementById('btn-quit').addEventListener('click', function() {
+    if (window.pickerQuitNative) {
+      var r = window.pickerQuitNative();
+      if (r && r.then) r.then(function() {}, function() {});
+    }
+  });
+
+  window.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape' && document.getElementById('rename-dialog').open) return;
+    if (e.key === 'Escape') {
+      if (window.pickerQuitNative) {
+        var r = window.pickerQuitNative();
+        if (r && r.then) r.then(function() {}, function() {});
+      }
+    }
+  });
+
+  render();
+  document.getElementById('new-name').focus();
+</script>
+</body>
+</html>

@@ -1,0 +1,65 @@
+name: Smoke test
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "main.go"
+      - "profiles_ui.go"
+      - "onboarding.go"
+      - "app_*.go"
+      - "tabs_windows.go"
+      - "init_script_dump_test.go"
+      - "scripts/cdp_smoke_test.mjs"
+      - ".github/workflows/smoke.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  cdp-shortcut-smoke:
+    name: CDP smoke (Ctrl+, opens Settings with Profiles card)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Check out Microsoft Edge (Chromium engine, closest to WebView2)
+        uses: browser-actions/setup-edge@v1
+        id: setup-edge
+
+      - name: Dump the exact runtime init script
+        run: go test -run TestZZSmokeDumpInitScriptHarness -v .
+
+      - name: Start Edge headless with CDP
+        run: |
+          "${{ steps.setup-edge.outputs.edge-path }}" \
+            --headless=new \
+            --remote-debugging-port=9222 \
+            --remote-allow-origins=* \
+            --no-first-run \
+            --disable-gpu \
+            about:blank &
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:9222/json/version >/dev/null; then
+              echo "CDP is up"; break
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:9222/json/version
+
+      - name: Run the CDP shortcut smoke test
+        run: node scripts/cdp_smoke_test.mjs --cdp-url http://127.0.0.1:9222 --init-script build/wa_init_script.js
+
+      - name: Upload smoke failure screenshot
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-failure
+          path: build/
+          if-no-files-found: ignore

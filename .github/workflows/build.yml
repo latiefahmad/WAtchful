@@ -1,0 +1,138 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, without the v prefix"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="${{ inputs.version }}"
+          fi
+          [[ "$VERSION" =~ ^[0-9]+(\.[0-9]+){2,3}$ ]] || {
+            echo "Invalid version: $VERSION"; exit 1;
+          }
+          grep -Fq "var appVersion = \"${VERSION}\"" updater.go || {
+            echo "updater.go appVersion must match release version ${VERSION}"; exit 1;
+          }
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+  macos:
+    needs: prepare
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: Build macOS bundle
+        run: bash build_mac.sh "${{ needs.prepare.outputs.version }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: |
+            WAtchful-macOS-Universal.dmg
+            WAtchful-macOS-Universal.zip
+
+  windows:
+    needs: prepare
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: Build Windows binary
+        shell: bash
+        run: bash build.sh windows "${{ needs.prepare.outputs.version }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            WAtchful.exe
+            WAtchful-Windows-x64.zip
+
+  linux-x64:
+    needs: prepare
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: Install WebKitGTK deps
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev
+      - name: Build Linux packages
+        run: bash build_linux.sh "${{ needs.prepare.outputs.version }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          path: |
+            WAtchful-Linux-x64.tar.gz
+            WAtchful-Linux-amd64.deb
+
+  linux-arm64:
+    needs: prepare
+    # GitHub-hosted ARM runners are available for public repositories.
+    # The embedded webview dependency links through the WebKitGTK 4.0 pkg-config
+    # name, which is available on Jammy for arm64.
+    runs-on: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: Install WebKitGTK deps
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev
+      - name: Build Linux arm64 packages
+        run: bash build_linux.sh "${{ needs.prepare.outputs.version }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64
+          if-no-files-found: error
+          path: |
+            WAtchful-Linux-arm64.tar.gz
+            WAtchful-Linux-arm64.deb
+
+  publish:
+    needs: [prepare, macos, windows, linux-x64, linux-arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.prepare.outputs.version }}
+          generate_release_notes: true
+          files: |
+            release-assets/WAtchful.exe
+            release-assets/WAtchful-Windows-x64.zip
+            release-assets/WAtchful-macOS-Universal.dmg
+            release-assets/WAtchful-macOS-Universal.zip
+            release-assets/WAtchful-Linux-x64.tar.gz
+            release-assets/WAtchful-Linux-amd64.deb
+            release-assets/WAtchful-Linux-arm64.tar.gz
+            release-assets/WAtchful-Linux-arm64.deb
