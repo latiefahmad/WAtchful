@@ -11,11 +11,11 @@ WAtchful is a small desktop wrapper for the official WhatsApp Web. It uses the w
 ## Application preview
 
 <p align="center">
-  <img src="screenshots/app-dark.png" width="900" alt="WAtchful main chat window">
+  <img src="screenshots/app.png" width="900" alt="WAtchful main chat window">
 </p>
 
 <p align="center">
-  <img src="screenshots/macos-menu.png" width="650" alt="WAtchful settings and appearance controls">
+  <img src="screenshots/menu.png" width="650" alt="WAtchful settings and appearance controls">
 </p>
 
 The screenshots use blurred chat content to protect personal information.
@@ -136,40 +136,6 @@ Inside, the Default profile keeps its session in `UserData/`, and every other pr
 - First release published from this repository, with installers built by CI for macOS (universal), Windows x64, and Linux x64/arm64 ([release notes](https://github.com/latiefahmad/WAtchful/releases/tag/v2.0.0)).
 - Cross-platform release build fixed end to end: the vendored webview profiles patch now compiles on Linux and macOS (cgo symbol resolution, Objective-C class ordering, duplicate-symbol cleanup), and Windows packaging works on CI runners.
 - The CDP smoke test that sends a real `Ctrl+,` key event into a real Chromium engine runs automatically on pull requests that touch the init script or platform integration files.
-
-## Version 1.5.9.2
-
-- Reduced CPU spikes while scrolling by deferring non-essential DOM observers and capping media/spellcheck scan batches.
-- Added local Help & diagnostics with a shortcut reference; it never sends chat data or files.
-- Added Fedora/RHEL x64 RPM packaging alongside the portable Linux archive.
-
-## Version 1.5.9.1
-
-- Linux update selection now distinguishes x64 and arm64, preventing an incompatible x64 download on arm64 devices.
-- Release automation builds and publishes macOS, Windows x64, Linux x64, and Linux arm64 from the tagged source version.
-- Removed the repository-tracked pseudo-secret build gate; it did not provide runtime security and could make a clean build fail unexpectedly.
-
-## Version 1.5.9
-
-- Critical fix: removed the v1.5.8 CSP policy that blocked WhatsApp boot bundles and left the app stuck on the splash screen.
-- If you installed v1.5.8, update to v1.5.9 (in-app updater or fresh download).
-
-## Version 1.5.8
-
-- Native folder picker on Linux (GTK) and system tray with quick controls.
-- Unified settings storage and extended WebView2 cache cleanup on Windows.
-- Drag & drop files into chat, native spellcheck, and search/translate context menu.
-- Taskbar progress badge on Windows and tray unread indicator on Linux.
-- Hardened runtime on macOS, lazy spreadsheet engine, and CSP hardening.
-- Unified `build.sh` and CI builds for macOS, Windows, and Linux.
-
-## Version 1.5.7
-
-- Attach menu works on macOS: Document and Photos & videos now open the native file picker.
-- Files are no longer saved twice when a download is triggered from two paths.
-- All v1.5.6 fixes included: silent background update on Windows (no console flashes), Fedora RPM packages, reliable document preview and appearance switching.
-
-Older releases are retained for reference but are deprecated.
 
 ## License and disclaimer
 
