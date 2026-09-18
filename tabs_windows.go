@@ -221,12 +221,11 @@ type tabTrackMouseEvt struct {
 // ---------------------------------------------------------------------------
 
 type chromiumView struct {
-	chromium   *edge.Chromium
-	outer      uintptr
-	shell      *tabShell
-	mu         sync.Mutex
-	bindings   map[string]interface{}
-	minW, minH int
+	chromium *edge.Chromium
+	outer    uintptr
+	shell    *tabShell
+	mu       sync.Mutex
+	bindings map[string]interface{}
 }
 
 var _ webview2.WebView = (*chromiumView)(nil)
@@ -391,7 +390,6 @@ type zoomSetter interface {
 // the manager (layoutViews) so views sit below the tab strip.
 func (v *chromiumView) Show() error { return v.chromium.Show() }
 func (v *chromiumView) Hide() error { return v.chromium.Hide() }
-func (v *chromiumView) Resize()     { v.shell.layoutViews() }
 func (v *chromiumView) Focus()      { v.chromium.Focus() }
 
 // SetZoomFactor applies the WebView2 page zoom factor (1.0 = 100%).
@@ -407,10 +405,8 @@ func (v *chromiumView) SetTitle(title string) {
 }
 
 func (v *chromiumView) SetSize(w int, h int, hint webview2.Hint) {
-	if hint == webview2.HintMin {
-		v.minW, v.minH = w, h
-		return
-	}
+	// Minimum-size hints are owned by the outer window (configureWindow);
+	// per-view minimums were stored but never applied anywhere.
 	if hint == webview2.HintNone && w > 0 && h > 0 {
 		tabSetWindowPos.Call(v.outer, 0, 0, 0, uintptr(w), uintptr(h),
 			uintptr(tabSWPNoZOrder|tabSWPNoActivate|tabSWPNoMove))
@@ -559,14 +555,6 @@ func (m *tabShell) activeEntry() *tabEntry {
 		return nil
 	}
 	return m.tabs[m.active]
-}
-
-func (m *tabShell) byID(id string) *tabEntry {
-	return tabCallOnPump(m, func() *tabEntry {
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		return m.byIDLocked(id)
-	})
 }
 
 func (m *tabShell) evalActive(script string) {

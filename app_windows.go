@@ -541,15 +541,6 @@ func focusExistingProfileWindow() {
 	}
 }
 
-func getUserDataDir() string {
-	// Multi-profile: return the active profile's own user-data folder so the
-	// WebView2 session (cookies, IndexedDB, service worker) stays isolated
-	// per account. The Default profile keeps the legacy <base>/UserData path.
-	dir := profileDirFor(getActiveProfile())
-	_ = os.MkdirAll(dir, 0755)
-	return dir
-}
-
 func ensureAppIconFile(dir string) string {
 	iconPath := filepath.Join(dir, "app_icon.png")
 	if _, err := os.Stat(iconPath); os.IsNotExist(err) && len(embeddedIconPNG) > 0 {

@@ -28,14 +28,6 @@ func debugLogPath() string {
 	return filepath.Join(getSettingsBaseDir(), "wa_debug.log")
 }
 
-func homeDirOrDot() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "."
-	}
-	return home
-}
-
 func cacheDebugLog(format string, args ...interface{}) {
 	if !debugEnabled() {
 		return
