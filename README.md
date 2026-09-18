@@ -24,7 +24,7 @@ The screenshots use blurred chat content to protect personal information.
 
 **[Download the latest release →](https://github.com/latiefahmad/WAtchful/releases/latest)** — the page detects your OS and highlights the right file.
 
-Latest published release: **v2.0.0** ([release notes](https://github.com/latiefahmad/WAtchful/releases/tag/v2.0.0))
+Latest published release: **v2.0.1** ([release notes](https://github.com/latiefahmad/WAtchful/releases/tag/v2.0.1))
 
 | Platform | Download |
 | --- | --- |
@@ -107,6 +107,11 @@ Default data locations (settings, profile registry, logs):
 - Linux: `~/.config/WAtchful/`
 
 Inside, the Default profile keeps its session in `UserData/`, and every other profile gets an isolated folder under `Profiles/<profile>/`. Installs upgraded from older versions keep using their existing `WhatsAppDesk/` folder, so no session is lost.
+
+## Version 2.0.1
+
+- The active tab's renderer is recycled in place after long sessions, capping WhatsApp Web's RAM growth (~0.7–0.9 GB after an hour of use → back to ~100–150 MB, session preserved).
+- Rebuild waits when a download is in flight or an in-app document preview is open, so no activity is ever interrupted.
 
 ## Version 2.0.0
 

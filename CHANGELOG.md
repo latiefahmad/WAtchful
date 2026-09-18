@@ -9,12 +9,18 @@ for the tagged version to GitHub **verbatim** as the release notes. Conventions:
 - Everything under the heading until the next `## [` heading is published as-is.
 - Write for end users: what is new, what is fixed, and which file to download.
 
-## [Unreleased]
+## [v2.0.1] - 2026-09-18
 
 ### ⚡ Memory
 
 - **Renderer recycler for the active tab (Windows)** — measured on a live session: WhatsApp Web's renderer process climbs to ~0.7–0.9 GB after an hour of use (chat media, decoded images, DOM) and never gives that memory back, no matter how long the app idles. The tab shell now rebuilds the active tab's engine in place after 6 hours of page age, using the same controller close/reopen path as tab hibernation: the login lives on disk, the tab keeps its position, and the fresh renderer resumes at ~100–150 MB. The rebuild waits when a download is in flight or an in-app document preview is open (the page reports this to the host), and retries on the next sweep if the rebuild was skipped.
 - Background tabs are unchanged: they already suspend after 30 s and hibernate (engine closed, ~400 MB returned) after 2 minutes.
+
+### 🔄 Updating
+
+Updates arrive automatically in-app: WAtchful checks for new releases shortly after startup and every 4 hours, then downloads, installs, and restarts itself — you only approve. Accept the banner when it appears, or download the file for your platform from this release manually.
+
+**Full Changelog**: https://github.com/latiefahmad/WAtchful/compare/v2.0.0...v2.0.1
 
 ## [v2.0.0] - 2026-09-18
 
