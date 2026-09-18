@@ -318,3 +318,65 @@ func TestTabStabilityPins(t *testing.T) {
 		t.Error("Windows must not CSS-scale the page body; it leaves a background gap")
 	}
 }
+
+// The active-tab renderer recycler: WhatsApp Web's renderer baseline climbs
+// to ~0.7–0.9 GB after an hour of use and the page never returns it, so the
+// shell rebuilds the engine in place after a long calm period. The rebuild
+// must stay gated on page activity (downloads, open document preview) and
+// reuse the hibernate wake path.
+func TestActiveTabRecyclerWiring(t *testing.T) {
+	shell, err := os.ReadFile("tabs_windows.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(shell)
+	for _, want := range []string{
+		"tabRecycleAge = 6 * time.Hour",
+		"func (m *tabShell) recycleActiveLocked",
+		"m.recycleActiveLocked(now)", // wired into sweepHidden
+		"func (m *tabShell) rebuildActiveTabLocked",
+		"m.destroyView(t)",
+		"m.buildView(t)",
+		"func (m *tabShell) setProfileBusyState",
+		"func (m *tabShell) recycleActiveProbeDone",
+		"if busy.downloads > 0",
+		"if busy.docmodal > 0",
+		"window.__waBusyProbe", // staleness probe into the page
+		"var tabSetProfileBusyState func(profileID, kind string, on bool)",
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("active-tab recycler is missing %q", want)
+		}
+	}
+
+	main, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(main)
+	for _, want := range []string{
+		"window.__waReportBusy('download', true)",      // gate on in-flight downloads
+		"window.__waReportBusy('download', false)",     // ...and clear on every exit
+		"window.setBusyStateNative('docmodal', true)",  // gate while preview open
+		"window.setBusyStateNative('docmodal', false)", // ...and clear on close
+		"window.__waBusyProbe = function",              // answer the staleness probe
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("page-side recycler gates are missing %q", want)
+		}
+	}
+
+	app, err := os.ReadFile("app_windows.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindings := string(app)
+	for _, want := range []string{
+		`_ = w.Bind("setBusyStateNative"`, // routes page reports to the shell
+		"tabSetProfileBusyState = func(profileID, kind string, on bool)",
+	} {
+		if !strings.Contains(bindings, want) {
+			t.Errorf("busy-state binding is missing %q", want)
+		}
+	}
+}

@@ -984,6 +984,10 @@ func getInitScript(ua string) string {
 			overlay.appendChild(modal);
 			document.body.appendChild(overlay);
 
+			// Tell the host a document preview is open: the renderer recycler
+		// must not rebuild underneath the modal.
+			if (window.setBusyStateNative) window.setBusyStateNative('docmodal', true);
+
 			function closeDocModal() {
 				window.removeEventListener('keydown', onEsc);
 				if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
@@ -992,6 +996,7 @@ func getInitScript(ua string) string {
 					ownedBlobUrl = '';
 				}
 				dataUri = '';
+				if (window.setBusyStateNative) window.setBusyStateNative('docmodal', false);
 				if (window.dismissStuckViewer) window.dismissStuckViewer();
 			}
 
@@ -1027,6 +1032,23 @@ func getInitScript(ua string) string {
 			window.addEventListener('keydown', onEsc);
 		}
 		window.showInAppDocModal = showInAppDocModal;
+
+		// Renderer recycler handshakes (Windows tab shell): report activity
+		// that must block an in-place renderer rebuild, and answer the
+		// host's staleness probe. Best-effort no-ops elsewhere.
+		(function() {
+			function waReportBusy(kind, on) {
+				if (window.setBusyStateNative) {
+					try { Promise.resolve(window.setBusyStateNative(kind, !!on)).catch(function() {}); } catch (e) {}
+				}
+			}
+			window.__waBusyProbe = function(kind) {
+				if (kind === 'docmodal') {
+					waReportBusy('query-docmodal', !!document.getElementById('wa-doc-modal-overlay'));
+				}
+			};
+			window.__waReportBusy = waReportBusy;
+		})();
 
 		// Intercept URL.createObjectURL to catch decrypted PDF/document blobs directly
 		var origCreateObjectURL = URL.createObjectURL;
@@ -2148,11 +2170,12 @@ func getInitScript(ua string) string {
 			// Same file arrives through different blob URLs depending on which
 			// path triggered it (bubble click, viewer download button, anchor
 			// intercept), so dedup by content length instead of the URL.
-			var activeDownloadSizes = {};
-
-			function releaseDownloadRequest(requestKey, immediately) {
-				delete activeDownloadKeys[requestKey];
-			}
+			var activeDownloadSizes = {};				function releaseDownloadRequest(requestKey, immediately) {
+					delete activeDownloadKeys[requestKey];
+					// Every release path is an exit of an in-flight download:
+					// clear the recycler gate (clamped at zero on the host side).
+					if (window.__waReportBusy) window.__waReportBusy('download', false);
+				}
 
 			// Toast action: opens the downloads folder in Finder/Explorer.
 			function openFolderAction() {
@@ -2161,9 +2184,11 @@ func getInitScript(ua string) string {
 					label: 'Open folder',
 					onClick: function() { window.openDownloadDirNative(); }
 				};
-			}				function markDownloadComplete(requestKey, savedPath, blobSize) {
-					var completedRequest = { status: 'complete', savedPath: savedPath };
-					activeDownloadKeys[requestKey] = completedRequest;
+			}				function markDownloadComplete(requestKey, savedPath, blobSize) {						var completedRequest = { status: 'complete', savedPath: savedPath };
+						activeDownloadKeys[requestKey] = completedRequest;
+						// Save finished: bytes are on disk. Clear the recycler gate;
+						// the key lingers only for dedup toasts.
+						if (window.__waReportBusy) window.__waReportBusy('download', false);
 					if (blobSize) {
 						// Cap the dedup index: one entry per distinct downloaded size is
 						// otherwise a slow RAM leak in long-lived sessions. Dropping the
@@ -2207,6 +2232,9 @@ func getInitScript(ua string) string {
 					return;
 				}
 				activeDownloadKeys[requestKey] = { status: 'downloading' };
+				// The renderer recycler must not rebuild while bytes are in
+				// flight: the fetch would die with the old renderer.
+				if (window.__waReportBusy) window.__waReportBusy('download', true);
 				showFloatingToast(isDoc ? ('📄 Opening preview: ' + filename + '...') : ('⏳ Downloading: ' + filename + '...'));
 
 				fetch(href)
@@ -2218,8 +2246,8 @@ func getInitScript(ua string) string {
 						// URL (second click, viewer button) was previously saved
 						// again as "name (1).ext". The Go saver also refuses
 						// byte-identical duplicates as a final backstop.
-						if (blob.size && activeDownloadSizes[blob.size]) {
-							var savedPath = activeDownloadSizes[blob.size];
+					if (blob.size && activeDownloadSizes[blob.size]) {
+						var savedPath = activeDownloadSizes[blob.size];
 							if (window.__waMarkSaved) window.__waMarkSaved(filename);
 							showFloatingToast(shouldAutoOpen ? ('📄 Already saved: ' + filename) : ('💾 File already saved: ' + filename), openFolderAction());
 							if (shouldAutoOpen) {

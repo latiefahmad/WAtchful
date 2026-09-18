@@ -650,6 +650,21 @@ func setupProfileBindings(w webview2.WebView, ctx *profileViewContext) {
 		)
 	})
 
+	// Renderer recycler gate: the page reports downloads in flight and open
+	// document previews so the tab shell never rebuilds the engine under
+	// them (the download would die with the old renderer). Rebinding per
+	// rebuilt view keeps the tab routed to the right profile.
+	tabSetProfileBusyState = func(profileID, kind string, on bool) {
+		if s := theShell; s != nil {
+			s.setProfileBusyState(profileID, kind, on)
+		}
+	}
+	_ = w.Bind("setBusyStateNative", func(profileID, kind string, on bool) {
+		if tabSetProfileBusyState != nil {
+			tabSetProfileBusyState(profileID, kind, on)
+		}
+	})
+
 	// Bind external link handler to open links in default Windows browser
 	_ = w.Bind("openExternalLink", func(rawURL string) {
 		if strings.HasPrefix(rawURL, "http://") || strings.HasPrefix(rawURL, "https://") {

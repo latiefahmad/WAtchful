@@ -127,6 +127,21 @@ const (
 	// Kept short on purpose: this app is meant to stay light.
 	tabHibernateGrace = 2 * time.Minute
 
+	// tabRecycleAge is how long the ACTIVE tab's page may run before the
+	// recycler rebuilds its renderer in place. WhatsApp Web's renderer
+	// baseline climbs with usage (measured: ~0.7–0.9 GB after an hour of
+	// active use — not a linear leak, just heap/DOM/decoded-media the page
+	// never returns) and no in-page GC gives it back. A fresh renderer
+	// resumes at ~100–150 MB. The rebuild reuses the hibernate wake path:
+	// the session lives on disk, the login persists, and the tab keeps its
+	// strip position; the page reload is invisible unless you watch RAM.
+	tabRecycleAge = 6 * time.Hour
+
+	// tabRecycleProbeEvery throttles the page-busy probe: while a rebuild is
+	// pending, ask the page at most once per minute instead of once per
+	// sweep tick.
+	tabRecycleProbeEvery = time.Minute
+
 	tabWSOverlappedWindow = 0xCF0000
 	tabWSChild            = 0x40000000
 	tabWSVisible          = 0x10000000
@@ -446,7 +461,24 @@ type tabEntry struct {
 	// zoom is this tab's display zoom (1.0 = 100%). Kept on the entry so it
 	// survives both suspend/resume and a hibernate/rebuild cycle.
 	zoom float64
+
+	// activeSince is when the current page finished loading (recycler age
+	// reference). recycleProbedAt throttles the recycler's busy probes.
+	activeSince     time.Time
+	recycleProbedAt time.Time
 }
+
+// tabBusyState counts in-page activity that must block a recycler rebuild:
+// downloads in flight and an open in-app document preview.
+type tabBusyState struct {
+	downloads int
+	docmodal  int
+}
+
+// tabSetProfileBusyState is installed by the tab shell for the page to
+// report activity that must block a recycler rebuild. Nil when no shell
+// exists (non-tab builds).
+var tabSetProfileBusyState func(profileID, kind string, on bool)
 
 type tabShell struct {
 	hwnd       uintptr
@@ -460,6 +492,10 @@ type tabShell struct {
 	tabs   []*tabEntry
 	active int
 	badges map[string]int
+
+	// busyMu guards the page-side busy signals (recycler gates).
+	busyMu sync.Mutex
+	busy   map[string]tabBusyState
 
 	isDark   bool
 	hoverTab int
@@ -608,6 +644,8 @@ func (m *tabShell) activateLocked(i int) {
 	m.active = i
 	cur := m.tabs[i]
 	cur.hiddenSince = time.Time{}
+	cur.activeSince = time.Now()
+	cur.recycleProbedAt = time.Time{}
 	setActiveProfile(cur.profile)
 
 	if cur.hibernated {
@@ -836,6 +874,7 @@ func (m *tabShell) buildView(t *tabEntry) error {
 	t.hibernated = false
 	c.NavigationCompletedCallback = func(_ *edge.ICoreWebView2, _ *edge.ICoreWebView2NavigationCompletedEventArgs) {
 		t.booted = true
+		t.activeSince = time.Now()
 	}
 	t.view = v
 	t.ctx = &profileViewContext{
@@ -911,6 +950,12 @@ func (m *tabShell) destroyView(t *tabEntry) {
 	t.ctx = nil
 	t.hibernated = true
 	t.booted = false
+	t.activeSince = time.Time{}
+	// A rebuilt page re-reports its own busy state; drop stale counters so
+	// the recycler never stays blocked by a page that no longer exists.
+	m.busyMu.Lock()
+	delete(m.busy, t.profile.ID)
+	m.busyMu.Unlock()
 }
 
 func (m *tabShell) removeTabLocked(id string) {
@@ -1642,6 +1687,140 @@ func (m *tabShell) sweepHidden() {
 			}
 		}
 	}
+	m.recycleActiveLocked(now)
+}
+
+// setProfileBusyState receives the page's activity reports (download in
+// flight, document preview open, recycler probe answers). The page pushes
+// state changes only, so this is cheap. Installed via
+// tabSetProfileBusyState by buildView.
+func (m *tabShell) setProfileBusyState(profileID, kind string, on bool) {
+	m.busyMu.Lock()
+	defer m.busyMu.Unlock()
+	switch kind {
+	case "download", "docmodal":
+		st := m.busy[profileID]
+		if kind == "download" {
+			if on {
+				st.downloads++
+			} else {
+				st.downloads--
+			}
+		} else {
+			if on {
+				st.docmodal++
+			} else {
+				st.docmodal--
+			}
+		}
+		if st.downloads < 0 {
+			st.downloads = 0
+		}
+		if st.docmodal < 0 {
+			st.docmodal = 0
+		}
+		m.busy[profileID] = st
+	case "query-docmodal":
+		// Answer to a recycler busy probe: on = a document preview is
+		// genuinely open (keep waiting); off = the counter was stale, clear
+		// it so later cycles don't keep re-probing.
+		if !on {
+			st := m.busy[profileID]
+			st.docmodal = 0
+			m.busy[profileID] = st
+		}
+		m.busyMu.Unlock()
+		// Off-pump: the answer arrives inside the old controller's message
+		// callback, so the rebuild must run from the next loop iteration,
+		// never from that callback frame.
+		go m.recycleActiveProbeDone(on)
+		m.busyMu.Lock()
+	}
+}
+
+// recycleActiveLocked rebuilds the active tab's engine in place once its
+// page has run long enough for WhatsApp Web's renderer baseline to bloat
+// (~0.7–0.9 GB; see tabRecycleAge). The rebuild is the same controller
+// close/reopen the hibernate wake path uses: session on disk, login kept,
+// strip position unchanged. Deferred while the page reports downloads or
+// an open document preview — a pending rebuild is retried on later sweeps.
+func (m *tabShell) recycleActiveLocked(now time.Time) {
+	if tabRecycleAge <= 0 || m.active < 0 || m.active >= len(m.tabs) {
+		return
+	}
+	t := m.tabs[m.active]
+	if t == nil || t.hibernated || t.view == nil || !t.booted {
+		return
+	}
+	if t.activeSince.IsZero() {
+		// Pre-recycler entry or a rebuild that never reached
+		// NavigationCompleted: seed the reference point and decide later.
+		t.activeSince = now
+		return
+	}
+	age := now.Sub(t.activeSince)
+	if age < tabRecycleAge {
+		return
+	}
+	if !t.recycleProbedAt.IsZero() && now.Sub(t.recycleProbedAt) < tabRecycleProbeEvery {
+		return
+	}
+	t.recycleProbedAt = now
+	m.busyMu.Lock()
+	busy := m.busy[t.profile.ID]
+	m.busyMu.Unlock()
+	if busy.downloads > 0 {
+		return
+	}
+	if busy.docmodal > 0 {
+		// The counters may be stale (modal closed without a report — e.g.
+		// the page reloaded mid-preview). Ask the page; off-pump eval is the
+		// same best-effort pattern focusTabView uses for a waking tab. A
+		// "modal gone" answer clears the counter and rebuilds via
+		// recycleActiveProbeDone; no answer just retries on a later sweep.
+		v := t.view
+		go v.Eval("if (window.__waBusyProbe) { window.__waBusyProbe('docmodal'); }")
+		return
+	}
+	m.rebuildActiveTabLocked(t)
+}
+
+// recycleActiveProbeDone applies the page's answer to a busy probe.
+func (m *tabShell) recycleActiveProbeDone(blocked bool) {
+	tabCallOnPump(m, func() struct{} {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if blocked || m.active < 0 || m.active >= len(m.tabs) {
+			return struct{}{}
+		}
+		t := m.tabs[m.active]
+		if t == nil || t.hibernated || t.view == nil || !t.booted {
+			return struct{}{}
+		}
+		m.rebuildActiveTabLocked(t)
+		return struct{}{}
+	})
+} // rebuildActiveTabLocked swaps the active tab's engine for a fresh one,
+// keeping the tab entry, zoom and strip position. Caller holds m.mu.
+func (m *tabShell) rebuildActiveTabLocked(t *tabEntry) {
+	p := t.profile
+	z := t.zoom
+	age := time.Since(t.activeSince)
+	m.destroyView(t)
+	t.profile = p
+	t.zoom = z
+	if err := m.buildView(t); err != nil {
+		// Leave the entry intact; the wake path (activateLocked) rebuilds on
+		// the next click, exactly like a failed wake from hibernation.
+		m.toastActiveLocked("⚠️ Could not refresh \"" + p.Name + "\". Click the tab to retry.")
+		return
+	}
+	m.layoutViewsLocked()
+	if t.view != nil {
+		t.view.Focus()
+	}
+	m.refreshChromeLocked()
+	cacheDebugLog("recycler: rebuilt active renderer for %s (age %.0f min)", p.ID, age.Minutes())
 }
 
 func shellWndProc(hwnd, m_, wp, lp uintptr) uintptr {
@@ -1785,6 +1964,7 @@ func runTabbedShell() {
 	m := &tabShell{
 		active:         -1,
 		badges:         map[string]int{},
+		busy:           map[string]tabBusyState{},
 		hoverTab:       -1,
 		executablePath: exe,
 		iconFullPath:   ensureAppIconFile(getSettingsBaseDir()),
