@@ -2023,7 +2023,7 @@ private:
         if (uuid) {
           if (id store =
                   reinterpret_cast<id (*)(id, SEL, id)>(objc_msgSend)(
-                      cls, selDataStore, uuid)) {
+                      (id)cls, selDataStore, uuid)) {
             objc::msg_send<void>(config, "setWebsiteDataStore:"_sel, store);
           }
         }
