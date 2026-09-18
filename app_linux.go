@@ -65,6 +65,12 @@ static int getWindowFrameLinux(void* winPtr, int* x, int* y, int* w, int* h) {
 	return 1;
 }
 
+// Provided by the vendored webview library (webview.h): selects the
+// per-profile WebKitGTK session before the engine is created. Declared here
+// because this TU never includes webview.h directly (cgo compiles this
+// preamble as C, so the header's C++ declarations are invisible).
+extern void webview_set_profile_id(const char* id);
+
 // Verify a saved frame still overlaps a connected monitor's geometry.
 static int frameOnSomeMonitor(int x, int y, int w, int h) {
 	GdkDisplay* display = gdk_display_get_default();

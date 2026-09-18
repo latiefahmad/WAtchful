@@ -14,6 +14,12 @@ package main
 // Go export (defined in app_darwin.go) used by the Profiles menus.
 extern void WAtchfulSwitchProfile(char* name);
 
+// Provided by the vendored webview library (webview.h): selects the
+// per-profile WKWebsiteDataStore before the WKWebView is created. Declared
+// here because this TU never includes webview.h directly (cgo compiles this
+// preamble as C, so the header's C++ declarations are invisible).
+extern void webview_set_profile_id(const char* id);
+
 // Declared early so the memory purge routine below can reach the live WKWebView
 // instance (and its real, already-attached website data store) instead of only
 // posting a notification that WebKit does not actually observe.

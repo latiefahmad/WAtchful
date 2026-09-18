@@ -2012,11 +2012,11 @@ private:
     // runtime guards below fall back to the shared default store when the
     // API is unavailable (macOS < 14) or the UUID cannot be parsed.
     if (!active_profile_id().empty()) {
-      if (id cls = objc_getClass("WKWebsiteDataStore")) {
+      if (Class cls = objc_getClass("WKWebsiteDataStore")) {
         auto selDataStore = sel_registerName("dataStoreForIdentifier:");
         auto uuidStr = objc::msg_send<id>(
             "NSString"_cls, "stringWithUTF8String:"_sel,
-            profile_data_store_uuid(active_profile_id()).c_str());
+            objc::profile_data_store_uuid(active_profile_id()).c_str());
         auto uuid = reinterpret_cast<id (*)(id, SEL, id)>(objc_msgSend)(
             objc::msg_send<id>("NSUUID"_cls, "alloc"_sel),
             sel_registerName("initWithUUIDString:"), uuidStr);

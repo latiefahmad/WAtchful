@@ -44,7 +44,13 @@ build_windows() {
         go build -ldflags="-H windowsgui -X main.appVersion=${VERSION}" \
         -trimpath -o WAtchful.exe .
     rm -f WAtchful-Windows-x64.zip
-    zip -q WAtchful-Windows-x64.zip WAtchful.exe
+    # GitHub-hosted Windows runners have no zip(1); PowerShell's Compress-Archive
+    # is always present there. Try zip first for local MSYS/MINGW environments.
+    if command -v zip >/dev/null 2>&1; then
+        zip -q WAtchful-Windows-x64.zip WAtchful.exe
+    else
+        powershell -NoProfile -Command "Compress-Archive -Force -Path 'WAtchful.exe' -DestinationPath 'WAtchful-Windows-x64.zip'"
+    fi
     echo "Created: WAtchful.exe and WAtchful-Windows-x64.zip"
 }
 
