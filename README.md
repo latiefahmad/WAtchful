@@ -1,6 +1,8 @@
 # WAtchful
 
 [![Release](https://img.shields.io/github/v/release/latiefahmad/WAtchful?label=release)](https://github.com/latiefahmad/WAtchful/releases/latest)
+[![Release build](https://github.com/latiefahmad/WAtchful/actions/workflows/build.yml/badge.svg)](https://github.com/latiefahmad/WAtchful/actions/workflows/build.yml)
+[![Smoke test](https://github.com/latiefahmad/WAtchful/actions/workflows/smoke.yml/badge.svg)](https://github.com/latiefahmad/WAtchful/actions/workflows/smoke.yml)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-555)](https://github.com/latiefahmad/WAtchful/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-555.svg)](LICENSE)
 
@@ -20,7 +22,9 @@ The screenshots use blurred chat content to protect personal information.
 
 ## Download
 
-Latest published release: **v2.0.0**
+**[Download the latest release →](https://github.com/latiefahmad/WAtchful/releases/latest)** — the page detects your OS and highlights the right file.
+
+Latest published release: **v2.0.0** ([release notes](https://github.com/latiefahmad/WAtchful/releases/tag/v2.0.0))
 
 | Platform | Download |
 | --- | --- |
@@ -28,8 +32,15 @@ Latest published release: **v2.0.0**
 | Windows 10/11 x64 | [EXE](https://github.com/latiefahmad/WAtchful/releases/latest/download/WAtchful.exe) · [ZIP](https://github.com/latiefahmad/WAtchful/releases/latest/download/WAtchful-Windows-x64.zip) |
 | Debian/Ubuntu x64 | [DEB](https://github.com/latiefahmad/WAtchful/releases/latest/download/WAtchful-Linux-amd64.deb) · [tar.gz](https://github.com/latiefahmad/WAtchful/releases/latest/download/WAtchful-Linux-x64.tar.gz) |
 | Fedora/RHEL x64 | [portable tar.gz](https://github.com/latiefahmad/WAtchful/releases/latest/download/WAtchful-Linux-x64.tar.gz) |
+| Linux arm64 | [DEB](https://github.com/latiefahmad/WAtchful/releases/latest/download/WAtchful-Linux-arm64.deb) · [tar.gz](https://github.com/latiefahmad/WAtchful/releases/latest/download/WAtchful-Linux-arm64.tar.gz) |
+
+The links above always serve the newest published release, so a permanent link never goes stale.
 
 Linux arm64 packages are published for every release. The updater only offers an architecture-compatible package; it never substitutes an x64 build on arm64.
+
+### Automatic updates
+
+WAtchful checks GitHub Releases shortly after startup and then every 4 hours. When a newer version is published, an in-app banner offers the update: WAtchful downloads the asset built for your OS and architecture, installs it, and restarts itself. You can also trigger the check manually from **Settings → Check for updates**. Nothing about your chats or account is sent during a check — the app only reads public release metadata from `github.com/latiefahmad/WAtchful`.
 
 ## Main features
 
@@ -103,6 +114,9 @@ Inside, the Default profile keeps its session in `UserData/`, and every other pr
 - Profiles UI script is wired into the page init script in the correct order, with a regression test locking the sequence.
 - The download dedup index is capped so long sessions no longer grow memory without bound.
 - Shortcut reference in Help & diagnostics now covers `Ctrl/Cmd + Shift + S` (startup) and `Ctrl/Cmd + Shift + H` (Help & onboarding).
+- First release published from this repository, with installers built by CI for macOS (universal), Windows x64, and Linux x64/arm64 ([release notes](https://github.com/latiefahmad/WAtchful/releases/tag/v2.0.0)).
+- Cross-platform release build fixed end to end: the vendored webview profiles patch now compiles on Linux and macOS (cgo symbol resolution, Objective-C class ordering, duplicate-symbol cleanup), and Windows packaging works on CI runners.
+- The CDP smoke test that sends a real `Ctrl+,` key event into a real Chromium engine runs automatically on pull requests that touch the init script or platform integration files.
 
 ## Version 1.5.9.2
 

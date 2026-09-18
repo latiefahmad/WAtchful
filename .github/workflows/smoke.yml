@@ -5,11 +5,22 @@ on:
   pull_request:
     branches: [main]
     paths:
+      # Page-side init script and its contributors (the shortcut/Profiles path)
       - "main.go"
+      - "profiles.go"
       - "profiles_ui.go"
       - "onboarding.go"
+      # Platform integration files
       - "app_*.go"
       - "tabs_windows.go"
+      - "tray_windows.go"
+      - "settings_*.go"
+      - "export_darwin.go"
+      - "vendor/github.com/webview/**"
+      # Build inputs that change what the init script compiles into
+      - "go.mod"
+      - "go.sum"
+      # Smoke test itself
       - "init_script_dump_test.go"
       - "scripts/cdp_smoke_test.mjs"
       - ".github/workflows/smoke.yml"
