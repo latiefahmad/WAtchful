@@ -118,15 +118,29 @@ jobs:
     needs: [prepare, macos, windows, linux-x64, linux-arm64]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: release-assets
           merge-multiple: true
+      - name: Extract release notes from CHANGELOG.md
+        shell: bash
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          awk -v ver="v${VERSION}" '
+            index($0, "## [" ver "]") == 1 { found=1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > release_notes.md
+          if [ ! -s release_notes.md ]; then
+            echo "CHANGELOG.md has no section for v${VERSION}" >&2
+            exit 1
+          fi
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.prepare.outputs.version }}
-          generate_release_notes: true
+          body_path: release_notes.md
           files: |
             release-assets/WAtchful.exe
             release-assets/WAtchful-Windows-x64.zip
