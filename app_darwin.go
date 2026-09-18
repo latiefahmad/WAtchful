@@ -614,8 +614,13 @@ static void setNativeWindowTheme(void* nsWindowPtr, const char* themeStr) {
 }
 
 // Multi-profile menu state (set from Go before the menus are built).
+@class MenuBridge; // forward decl: addProfilesSubmenu below targets g_menuBridge
 static NSString* g_profileMenuNames = nil; // newline-joined display names
 static NSString* g_activeProfileName = nil;
+// Defined once here (before first use in addProfilesSubmenu); the MenuBridge
+// class itself is declared further down, which is fine for @selector/target
+// wiring inside a single translation unit.
+static MenuBridge* g_menuBridge = nil;
 
 static NSArray<NSString*>* profileDisplayNames(void) {
     NSMutableArray<NSString*>* names = [NSMutableArray array];
@@ -737,7 +742,6 @@ static void addProfilesSubmenu(NSMenu* parentMenu) {
 }
 @end
 
-static MenuBridge* g_menuBridge = nil;
 static NSStatusItem* g_statusItem = nil;
 
 // set_profile_menu_state hands the menu builder the profile display names
