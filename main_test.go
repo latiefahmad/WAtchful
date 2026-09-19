@@ -301,6 +301,23 @@ func TestPrivacyModeUsesSolidRedactionWithoutFuzzyTextShadow(t *testing.T) {
 	}
 }
 
+// Link/URL text sits directly inside <a> with its own explicit color, so it
+// never inherits the redacted span color. Both redaction and hover-restore
+// must therefore cover anchors everywhere spans are covered, or URLs leak.
+func TestPrivacyModeRedactsLinks(t *testing.T) {
+	script := getInitScript("test-agent")
+	for _, want := range []string{
+		`[data-testid="msg-container"] a:not([data-wa-time])`,
+		`[data-testid="msg-container"]:hover a`,
+		`[role="row"] a:not([data-wa-time])`,
+		`[role="row"]:hover a`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("privacy link redaction is missing %q", want)
+		}
+	}
+}
+
 func TestThemeReapplyIsBoundedAndAvoidsObserverFeedbackLoop(t *testing.T) {
 	script := getInitScript("test-agent")
 	for _, want := range []string{

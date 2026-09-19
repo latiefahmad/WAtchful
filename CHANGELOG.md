@@ -9,6 +9,18 @@ for the tagged version to GitHub **verbatim** as the release notes. Conventions:
 - Everything under the heading until the next `## [` heading is published as-is.
 - Write for end users: what is new, what is fixed, and which file to download.
 
+## [v2.0.5] - 2026-09-19
+
+### 🛠 Fixed
+
+- **Privacy mode now redacts links and URLs** — link text in WhatsApp renders as a text node directly inside `<a>` with its own explicit color, so it never inherited the redacted span color and stayed readable while everything else blurred (including after the 60-second idle auto-lock). The redaction and hover-restore rules now cover anchors everywhere spans are covered: message bubbles and chat-list previews. Verified in headless Edge against the shipped stylesheet, including a hostile `!important` link color.
+
+### 🔄 Updating
+
+Updates arrive automatically in-app: WAtchful checks for new releases shortly after startup and every 4 hours, then downloads, installs, and restarts itself — you only approve. Accept the banner when it appears, or download the file for your platform from this release manually.
+
+**Full Changelog**: https://github.com/latiefahmad/WAtchful/compare/v2.0.4...v2.0.5
+
 ## [v2.0.4] - 2026-09-18
 
 ### 🛠 Fixed

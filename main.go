@@ -1433,12 +1433,19 @@ func getInitScript(ua string) string {
 				'.privacy-mode #pane-side [role="row"] span.selectable-text:not([data-wa-time]),',
 				'.privacy-mode [data-testid="chat-list"] [role="row"] span.selectable-text:not([data-wa-time]),',
 				'.privacy-mode #pane-side [role="row"] span[title]:not([data-wa-time]),',
-				'.privacy-mode [data-testid="chat-list"] [role="row"] span[title]:not([data-wa-time])',
+				'.privacy-mode [data-testid="chat-list"] [role="row"] span[title]:not([data-wa-time]),',
+				// Links carry their own explicit color, so a URL text node sitting
+				// directly inside <a> never inherits the redacted span color —
+				// redact anchors too (chat-list previews can contain URLs).
+				'.privacy-mode #pane-side [role="row"] a:not([data-wa-time]),',
+				'.privacy-mode [data-testid="chat-list"] [role="row"] a:not([data-wa-time])',
 				'{ color: transparent !important; text-shadow: none !important; background: rgba(134,150,160,.42) !important; border-radius: 3px; }',
 				// Hovering a row restores every span beneath it, so restore can
 				// never disagree with blur even if WhatsApp rotates classes.
 				'.privacy-mode #pane-side [role="row"]:hover span,',
-				'.privacy-mode [data-testid="chat-list"] [role="row"]:hover span',
+				'.privacy-mode [data-testid="chat-list"] [role="row"]:hover span,',
+				'.privacy-mode #pane-side [role="row"]:hover a,',
+				'.privacy-mode [data-testid="chat-list"] [role="row"]:hover a',
 				'{ color: inherit !important; text-shadow: none !important; background: transparent !important; }',
 				// Layer 2: everything textual inside a message bubble, keyed ONLY
 				// on the long-stable [data-testid="msg-container"] hook — never
@@ -1447,9 +1454,14 @@ func getInitScript(ua string) string {
 				// hover-to-peek silently died). Hovering the bubble restores
 				// the whole subtree, so blur and restore can never disagree.
 				// The reply box lives outside msg-container and stays usable.
-				'.privacy-mode #main [data-testid="msg-container"] span:not([data-wa-time])',
+				// Anchors are covered too: link/URL text sits directly inside
+				// <a> with its own explicit color, so it never inherits the
+				// redacted span color (this was the un-blurred-URL leak).
+				'.privacy-mode #main [data-testid="msg-container"] span:not([data-wa-time]),',
+				'.privacy-mode #main [data-testid="msg-container"] a:not([data-wa-time])',
 				'{ color: transparent !important; text-shadow: none !important; background: rgba(134,150,160,.42) !important; border-radius: 3px; }',
-				'.privacy-mode #main [data-testid="msg-container"]:hover span',
+				'.privacy-mode #main [data-testid="msg-container"]:hover span,',
+				'.privacy-mode #main [data-testid="msg-container"]:hover a',
 				'{ color: inherit !important; text-shadow: none !important; background: transparent !important; }',
 				// In-chat photos/videos hide the same way (filter is the only
 				// tool for replaced elements); hover restores symmetrically.
