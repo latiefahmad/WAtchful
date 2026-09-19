@@ -9,6 +9,18 @@ for the tagged version to GitHub **verbatim** as the release notes. Conventions:
 - Everything under the heading until the next `## [` heading is published as-is.
 - Write for end users: what is new, what is fixed, and which file to download.
 
+## [v2.0.6] - 2026-09-19
+
+### 🛠 Fixed
+
+- **App no longer freezes ("Not responding") when switching tabs** - Win32 re-enters our window procedure on the same thread in the middle of COM calls (caught live in a stack dump: `MoveFocus` synchronously redelivers `WM_ACTIVATE`, whose handler took the already-held tab mutex). With a plain mutex that deadlocked the pump thread forever at 0% CPU. The tab mutex is now re-entrant (owner-tracked), second launches use `SendMessageTimeout` so they can never pile up behind a busy window, and a pump watchdog writes goroutine stacks to Temp on any 25-second stall. Verified with an 8-minute stability run, a hibernated-tab wake, and an IPC tab-switch - all responsive, watchdog silent.
+
+### 🔄 Updating
+
+Updates arrive automatically in-app: WAtchful checks for new releases shortly after startup and every 4 hours, then downloads, installs, and restarts itself — you only approve. Accept the banner when it appears, or download the file for your platform from this release manually.
+
+**Full Changelog**: https://github.com/latiefahmad/WAtchful/compare/v2.0.5...v2.0.6
+
 ## [v2.0.5] - 2026-09-19
 
 ### 🛠 Fixed

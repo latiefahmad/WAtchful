@@ -240,7 +240,49 @@ func TestDPIAwarenessWiring(t *testing.T) {
 	}
 }
 
-// sumTabBadges aggregates unread counts; the taskbar shows the total.
+// Teardown (suspend/hibernate/recycle) must never touch a controller that
+// is still in early page load: closing or suspending it then can wedge
+// WebView2 controller calls pump-wide ("Not responding", ~0% CPU).
+func TestTeardownNeedsSettledController(t *testing.T) {
+	now := time.Now()
+	fresh := &tabEntry{booted: false}
+	if fresh.teardownReady(now) {
+		t.Error("an unbooted tab must never be torn down")
+	}
+	booting := &tabEntry{booted: true, firstReady: now.Add(-time.Minute)}
+	if booting.teardownReady(now) {
+		t.Error("a tab only 1 minute past first commit must not be torn down yet")
+	}
+	settled := &tabEntry{booted: true, firstReady: now.Add(-minControllerSettle - time.Minute)}
+	if !settled.teardownReady(now) {
+		t.Error("a long-settled tab must be eligible for teardown")
+	}
+	if minControllerSettle < tabHibernateGrace {
+		t.Errorf("settle window %v must cover the hibernate path, else fresh tabs can be closed mid-load", minControllerSettle)
+	}
+}
+
+// The pump window procedure re-enters on the same thread in the middle of
+// COM calls (proven live: MoveFocus synchronously redelivers WM_ACTIVATE).
+// tabShell.mu must therefore tolerate same-thread re-entry — a plain
+// sync.Mutex deadlocks the pump forever (0% CPU, "Not responding"). The
+// timeout guard keeps a regression from hanging the test binary itself.
+func TestPumpMutexReentrant(t *testing.T) {
+	done := make(chan bool, 1)
+	go func() {
+		var mu pumpMutex
+		mu.Lock()
+		mu.Lock() // re-entrant take: must not block
+		mu.Unlock()
+		mu.Unlock()
+		done <- true
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("pumpMutex deadlocked on same-thread re-entry")
+	}
+}
 func TestSumTabBadges(t *testing.T) {
 	if got := sumTabBadges(map[string]int{}); got != 0 {
 		t.Errorf("empty = %d, want 0", got)

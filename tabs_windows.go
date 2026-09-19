@@ -24,9 +24,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -64,23 +66,26 @@ var (
 	tabGetThreadID     = tabKernel32.NewProc("GetCurrentThreadId")
 	tabGetModuleHandle = tabKernel32.NewProc("GetModuleHandleW")
 	tabFindWindow      = tabUser32.NewProc("FindWindowW")
-	tabSendMessage     = tabUser32.NewProc("SendMessageW")
-	tabInvalidateRect  = tabUser32.NewProc("InvalidateRect")
-	tabBeginPaint      = tabUser32.NewProc("BeginPaint")
-	tabEndPaint        = tabUser32.NewProc("EndPaint")
-	tabTrackMouse      = tabUser32.NewProc("TrackMouseEvent")
-	tabLoadCursor      = tabUser32.NewProc("LoadCursorW")
-	tabGetSysMetrics   = tabUser32.NewProc("GetSystemMetrics")
-	tabSetFgWindow     = tabUser32.NewProc("SetForegroundWindow")
-	tabShowNormal      = tabUser32.NewProc("ShowWindow")
-	tabEnumChildren    = tabUser32.NewProc("EnumChildWindows")
-	tabEnumWindows     = tabUser32.NewProc("EnumWindows")
-	tabIsVisible       = tabUser32.NewProc("IsWindowVisible")
-	tabSetFocus        = tabUser32.NewProc("SetFocus")
-	tabGetClassName    = tabUser32.NewProc("GetClassNameW")
-	tabGetWindowRect   = tabUser32.NewProc("GetWindowRect")
-	tabGetDC           = tabUser32.NewProc("GetDC")
-	tabReleaseDC       = tabUser32.NewProc("ReleaseDC")
+	// SendMessageTimeoutW: same delivery, but a wedged receiver can only
+	// stall the sender for uTimeout ms instead of forever (second launches
+	// used to pile up as immortal processes behind a hung window).
+	tabSendMessageTO  = tabUser32.NewProc("SendMessageTimeoutW")
+	tabInvalidateRect = tabUser32.NewProc("InvalidateRect")
+	tabBeginPaint     = tabUser32.NewProc("BeginPaint")
+	tabEndPaint       = tabUser32.NewProc("EndPaint")
+	tabTrackMouse     = tabUser32.NewProc("TrackMouseEvent")
+	tabLoadCursor     = tabUser32.NewProc("LoadCursorW")
+	tabGetSysMetrics  = tabUser32.NewProc("GetSystemMetrics")
+	tabSetFgWindow    = tabUser32.NewProc("SetForegroundWindow")
+	tabShowNormal     = tabUser32.NewProc("ShowWindow")
+	tabEnumChildren   = tabUser32.NewProc("EnumChildWindows")
+	tabEnumWindows    = tabUser32.NewProc("EnumWindows")
+	tabIsVisible      = tabUser32.NewProc("IsWindowVisible")
+	tabSetFocus       = tabUser32.NewProc("SetFocus")
+	tabGetClassName   = tabUser32.NewProc("GetClassNameW")
+	tabGetWindowRect  = tabUser32.NewProc("GetWindowRect")
+	tabGetDC          = tabUser32.NewProc("GetDC")
+	tabReleaseDC      = tabUser32.NewProc("ReleaseDC")
 	// GetDpiForWindow exists from Windows 10 1607; Find() guards the older
 	// fallback so a missing proc can never panic (see the DrawTextW lesson).
 	tabGetDpiForWindow = tabUser32.NewProc("GetDpiForWindow")
@@ -126,6 +131,15 @@ const (
 	// (~1–3 s); the account stays logged in because the session lives on disk.
 	// Kept short on purpose: this app is meant to stay light.
 	tabHibernateGrace = 2 * time.Minute
+
+	// minControllerSettle is how long after a controller's first navigation
+	// commit before suspend/hibernate/recycle may touch it. Teardown issued
+	// while the renderer is still in early page load (fresh profile booting
+	// WhatsApp: service worker, IndexedDB, lazy bundles) can wedge WebView2
+	// controller calls for 10s+ at a time — the window stops pumping and
+	// reports "Not responding" with ~0% CPU. NavigationCompleted fires at
+	// first commit, far too early to be safe on its own.
+	minControllerSettle = 3 * time.Minute
 
 	// tabRecycleAge is how long the ACTIVE tab's page may run before the
 	// recycler rebuilds its renderer in place. WhatsApp Web's renderer
@@ -460,6 +474,12 @@ type tabEntry struct {
 	// zoom is this tab's display zoom (1.0 = 100%). Kept on the entry so it
 	// survives both suspend/resume and a hibernate/rebuild cycle.
 	zoom float64
+	// firstReady marks the controller's first navigation commit. Suspend,
+	// hibernate and recycle must all wait until minControllerSettle after
+	// this: teardown issued while the renderer is still in early page load
+	// can wedge WebView2 controller calls and freeze the pump ("Not
+	// responding", ~0% CPU). Reset on every rebuild (fresh controller).
+	firstReady time.Time
 
 	// activeSince is when the current page finished loading (recycler age
 	// reference). recycleProbedAt throttles the recycler's busy probes.
@@ -479,15 +499,53 @@ type tabBusyState struct {
 // exists (non-tab builds).
 var tabSetProfileBusyState func(profileID, kind string, on bool)
 
+// pumpMutex is a re-entrant mutex for tabShell.mu. Win32 routinely
+// re-enters our window procedure on the SAME thread in the middle of a COM
+// call (e.g. MoveFocus synchronously delivers WM_ACTIVATE; a nested Embed
+// pump dispatches WM_TIMER): with a plain sync.Mutex the re-entered frame
+// deadlocks on a lock we already hold — pump frozen, 0% CPU, "Not
+// responding" forever (caught live by the pump watchdog). Re-entrancy is
+// only ever same-thread here (COM threads marshal through tabCallOnPump and
+// never hold the lock across it), so owner-tracking is exact.
+type pumpMutex struct {
+	mu    sync.Mutex
+	owner atomic.Uint32
+	depth atomic.Int32
+}
+
+func tabCurrentThreadID() uint32 {
+	id, _, _ := tabGetThreadID.Call()
+	return uint32(id)
+}
+
+func (m *pumpMutex) Lock() {
+	tid := tabCurrentThreadID()
+	if m.owner.Load() == tid {
+		m.depth.Add(1)
+		return
+	}
+	m.mu.Lock()
+	m.owner.Store(tid)
+	m.depth.Store(1)
+}
+
+func (m *pumpMutex) Unlock() {
+	if m.depth.Add(-1) == 0 {
+		m.owner.Store(0)
+		m.mu.Unlock()
+	}
+}
+
 type tabShell struct {
 	hwnd       uintptr
 	strip      uintptr
 	pumpThread uint32
+	pumpTick   int64 // UnixNano of the last pump-loop iteration (hang watchdog)
 
 	pumpMu sync.Mutex
 	pumpQ  []func()
 
-	mu     sync.Mutex // guards tabs/active/badges below
+	mu     pumpMutex // guards tabs/active/badges below (re-entrant: see pumpMutex)
 	tabs   []*tabEntry
 	active int
 	badges map[string]int
@@ -520,6 +578,42 @@ func (m *tabShell) dispatch(f func()) {
 	m.pumpQ = append(m.pumpQ, f)
 	m.pumpMu.Unlock()
 	tabPostThreadMsg.Call(uintptr(m.pumpThread), tabWMApp, 0, 0)
+}
+
+// watchPumpHang guards the message pump: every 5s it checks whether the
+// pump loop has ticked in the last 25s; if not, it appends a full goroutine
+// dump to watchful_pumpstack.log in Temp so a "Not responding" freeze can be
+// attributed to the exact blocking call. Zero cost while healthy (one atomic
+// load per 5s) and writes only while actually stuck.
+func watchPumpHang(tick *int64) {
+	reported := false
+	armedAt := time.Now()
+	for {
+		time.Sleep(5 * time.Second)
+		last := time.Unix(0, atomic.LoadInt64(tick))
+		if last.Before(armedAt) {
+			// Pump hasn't looped once yet (early startup): nothing to judge.
+			continue
+		}
+		if time.Since(last) > 25*time.Second {
+			if !reported {
+				reported = true
+				f, err := os.OpenFile(filepath.Join(os.TempDir(), "watchful_pumpstack.log"),
+					os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+				if err == nil {
+					fmt.Fprintf(f, "=== pump stuck since %v (now %v) ===\n",
+						last.Format(time.RFC3339), time.Now().Format(time.RFC3339))
+					buf := make([]byte, 1<<20)
+					n := runtime.Stack(buf, true) // ALL goroutines, not just this one
+					f.Write(buf[:n])
+					f.WriteString("\n")
+					f.Close()
+				}
+			}
+		} else {
+			reported = false
+		}
+	}
 }
 
 func (m *tabShell) drainPump() {
@@ -863,9 +957,13 @@ func (m *tabShell) buildView(t *tabEntry) error {
 	t.booted = false
 	t.suspendedByUs = false
 	t.hibernated = false
+	t.firstReady = time.Time{}
 	c.NavigationCompletedCallback = func(_ *edge.ICoreWebView2, _ *edge.ICoreWebView2NavigationCompletedEventArgs) {
 		t.booted = true
 		t.activeSince = time.Now()
+		if t.firstReady.IsZero() {
+			t.firstReady = time.Now()
+		}
 	}
 	t.view = v
 	t.ctx = &profileViewContext{
@@ -905,6 +1003,12 @@ func (m *tabShell) hibernateLocked(t *tabEntry) {
 // memory), then hibernate (closes the engine, frees ~400 MB, reloads on wake).
 func shouldSuspend(d time.Duration) bool   { return d >= tabSuspendGrace }
 func shouldHibernate(d time.Duration) bool { return d >= tabHibernateGrace }
+
+// teardownReady reports whether a tab's controller is settled enough to be
+// suspended, hibernated or recycled. See minControllerSettle.
+func (t *tabEntry) teardownReady(now time.Time) bool {
+	return t.booted && !t.firstReady.IsZero() && now.Sub(t.firstReady) >= minControllerSettle
+}
 
 // openTab creates the tab for p if missing and activates it.
 func (m *tabShell) openTab(p Profile) {
@@ -1682,13 +1786,13 @@ func (m *tabShell) sweepHidden() {
 			continue
 		}
 		idle := now.Sub(t.hiddenSince)
-		if shouldHibernate(idle) && t.booted {
-			// Only a fully loaded tab is worth keeping warm; once it has been
-			// idle this long, trading a reload for ~400 MB back is the point.
+		if shouldHibernate(idle) && t.teardownReady(now) {
+			// Only a settled tab is worth tearing down; closing a
+			// still-booting controller can wedge WebView2 calls pump-wide.
 			m.hibernateLocked(t)
 			continue
 		}
-		if !t.booted || t.suspendedByUs {
+		if !t.booted || t.suspendedByUs || !t.teardownReady(now) {
 			continue
 		}
 		if shouldSuspend(idle) {
@@ -1845,7 +1949,7 @@ func shellWndProc(hwnd, m_, wp, lp uintptr) uintptr {
 		return 0
 	case tabWMSize:
 		if wp == tabSizeMinimized {
-			if t := m.activeEntry(); t != nil && t.view != nil {
+			if t := m.activeEntry(); t != nil && t.view != nil && t.teardownReady(time.Now()) {
 				if t.view.Suspend() {
 					m.mu.Lock()
 					t.suspendedByUs = true
@@ -2122,9 +2226,13 @@ func runTabbedShell() {
 	}
 	tabSetTimer.Call(hwnd, tabTimerSweep, uintptr(uint32(tabSweepEvery/time.Millisecond)), 0)
 
+	// Pump watchdog: if the pump thread stops looping for 25s, dump every
+	// goroutine stack to watchful_pumpstack.log in Temp.
+	go watchPumpHang(&m.pumpTick)
 	var msg tabMsg
 	for {
 		r, _, _ := tabGetMessage.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0)
+		atomic.StoreInt64(&m.pumpTick, time.Now().UnixNano())
 		if int32(r) <= 0 {
 			break
 		}
@@ -2218,7 +2326,11 @@ func focusTabbedShell(profileName string) {
 		}
 	}
 	// wParam 0 = focus only (unknown profile or none requested).
-	tabSendMessage.Call(hwnd, tabWMTabGoTo, uintptr(idx+1), 0)
+	// Timeout-guarded delivery: if the running instance is momentarily busy,
+	// the sender still exits instead of hanging behind it forever.
+	var tabGoToResult uintptr
+	tabSendMessageTO.Call(hwnd, tabWMTabGoTo, uintptr(idx+1), 0, 0, 10000,
+		uintptr(unsafe.Pointer(&tabGoToResult)))
 	tabShowWindow.Call(hwnd, tabSWRestore)
 	tabSetFgWindow.Call(hwnd)
 }
