@@ -46,10 +46,10 @@ func extractTarGz(srcFile, destDir string) error {
 		}
 		switch header.Typeflag {
 		case tar.TypeDir:
-			_ = os.MkdirAll(targetPath, 0755)
+			_ = os.MkdirAll(targetPath, safeTarMode(int64(header.Mode), true))
 		case tar.TypeReg:
 			_ = os.MkdirAll(filepath.Dir(targetPath), 0755)
-			outFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, os.FileMode(header.Mode))
+			outFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, safeTarMode(int64(header.Mode), false))
 			if err != nil {
 				return err
 			}

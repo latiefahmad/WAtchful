@@ -26,7 +26,7 @@ type UIController interface {
 // builds override it with -ldflags "-X main.appVersion=X.Y.Z[.N]"; the literal
 // here is only the development fallback. UI strings must never hardcode a
 // version — they use the __WA_APP_VERSION__ placeholder replaced at runtime.
-var appVersion = "2.0.7"
+var appVersion = "2.0.8"
 
 const githubRepo = "latiefahmad/WAtchful"
 
@@ -367,6 +367,25 @@ func (pw *progressWriter) Write(p []byte) (int, error) {
 	return n, nil
 }
 
+// maxUpdateBytes caps a self-update download. Enforced both up front
+// (Content-Length) and during the copy (limited reader), so a lying or
+// missing length header cannot fill the disk either.
+var maxUpdateBytes int64 = 512 << 20
+
+// safeTarMode strips elevated/special mode bits from an update-archive
+// entry: setuid, setgid and sticky bits never propagate to disk.
+// Executability survives only as plain 0755 vs 0644, and directories are
+// always created 0755. Pure so it stays unit-testable on every host.
+func safeTarMode(m int64, isDir bool) os.FileMode {
+	if isDir {
+		return 0755
+	}
+	if os.FileMode(m)&0111 != 0 {
+		return 0755
+	}
+	return 0644
+}
+
 func downloadFileWithProgress(url, destPath string, onProgress func(int)) error {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -384,6 +403,9 @@ func downloadFileWithProgress(url, destPath string, onProgress func(int)) error 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download failed with HTTP %d", resp.StatusCode)
 	}
+	if resp.ContentLength > maxUpdateBytes {
+		return fmt.Errorf("update rejected: size exceeds %d-byte limit", maxUpdateBytes)
+	}
 
 	out, err := os.Create(destPath)
 	if err != nil {
@@ -396,8 +418,16 @@ func downloadFileWithProgress(url, destPath string, onProgress func(int)) error 
 		onProgress: onProgress,
 	}
 
-	_, err = io.Copy(out, io.TeeReader(resp.Body, pw))
-	return err
+	_, err = io.Copy(out, io.TeeReader(io.LimitReader(resp.Body, maxUpdateBytes+1), pw))
+	if err != nil {
+		return err
+	}
+	if pw.downloaded > maxUpdateBytes {
+		_ = out.Close()
+		_ = os.Remove(destPath)
+		return fmt.Errorf("update rejected: size exceeds %d-byte limit", maxUpdateBytes)
+	}
+	return nil
 }
 
 // windowsUpdateBatch is kept platform-neutral so the restart contract can be
@@ -445,6 +475,30 @@ del /f /q "%%~f0" >NUL 2>&1
 `, pid, newExePath, execPath)
 }
 
+// isAllowedUpdateURL restricts self-update downloads to release artifacts
+// of this repository served over HTTPS from github.com
+// (/<owner>/<repo>/releases/...), so a page script can never point the
+// updater at an arbitrary URL — which the app would otherwise download,
+// install and restart into.
+func isAllowedUpdateURL(rawURL string) bool {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || !strings.EqualFold(u.Scheme, "https") {
+		return false
+	}
+	if !strings.EqualFold(u.Host, "github.com") {
+		return false
+	}
+	owner, repo, ok := strings.Cut(githubRepo, "/")
+	if !ok {
+		return false
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) < 4 || parts[0] != owner || parts[1] != repo || parts[2] != "releases" {
+		return false
+	}
+	return true
+}
+
 func executeUpdate(ui UIController, downloadURL string) error {
 	if !updateExecutionMu.TryLock() {
 		ui.Dispatch(func() {
@@ -453,6 +507,14 @@ func executeUpdate(ui UIController, downloadURL string) error {
 		return nil
 	}
 	defer updateExecutionMu.Unlock()
+
+	if !isAllowedUpdateURL(downloadURL) {
+		err := fmt.Errorf("refusing update from outside this repository's releases")
+		ui.Dispatch(func() {
+			ui.Eval(fmt.Sprintf("if (window.onUpdateError) { window.onUpdateError(%q); }", err.Error()))
+		})
+		return err
+	}
 
 	ext := updateDownloadExtension(downloadURL)
 	destFile := filepath.Join(os.TempDir(), "whatsapp_update_download"+ext)

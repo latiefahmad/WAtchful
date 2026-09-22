@@ -1,6 +1,10 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -163,5 +167,101 @@ func TestCheckForUpdateLive(t *testing.T) {
 	}
 	if infoOld.DownloadURL == "" {
 		t.Errorf("expected non-empty download URL")
+	}
+}
+
+// The updater must only ever download release artifacts of this repository
+// over HTTPS from github.com: a page script handing startUpdateNative an
+// arbitrary URL must be refused before anything is fetched, let alone
+// installed and restarted into.
+func TestIsAllowedUpdateURL(t *testing.T) {
+	allowed := []string{
+		updateAssetForPlatform("windows", "amd64"),
+		updateAssetForPlatform("darwin", "arm64"),
+		updateAssetForPlatform("linux", "amd64"),
+		updateAssetForPlatform("linux", "arm64"),
+		"https://github.com/latiefahmad/WAtchful/releases/download/v2.0.7/WAtchful.exe",
+		"https://github.com/latiefahmad/WAtchful/releases/latest/download/WAtchful-Windows-x64.zip",
+	}
+	for _, u := range allowed {
+		if !isAllowedUpdateURL(u) {
+			t.Errorf("isAllowedUpdateURL(%q) = false, want true", u)
+		}
+	}
+	denied := []string{
+		"",
+		"not a url",
+		"http://github.com/latiefahmad/WAtchful/releases/latest/download/WAtchful.exe",
+		"https://objects.githubusercontent.com/evil/payload.exe",
+		"https://github.com/attacker/WAtchful/releases/latest/download/WAtchful.exe",
+		"https://github.com/latiefahmad/OtherApp/releases/latest/download/WAtchful.exe",
+		"https://github.com/latiefahmad/WAtchful/issues/1",
+		"https://github.com/latiefahmad/WAtchful",
+		"https://evil-github.com/latiefahmad/WAtchful/releases/latest/download/WAtchful.exe",
+		"file:///tmp/WAtchful.exe",
+	}
+	for _, u := range denied {
+		if isAllowedUpdateURL(u) {
+			t.Errorf("isAllowedUpdateURL(%q) = true, want false", u)
+		}
+	}
+}
+
+// Self-update downloads are capped: an oversized payload is refused and no
+// partial file is left behind, while a small payload still downloads intact.
+func TestDownloadFileWithProgressEnforcesCap(t *testing.T) {
+	old := maxUpdateBytes
+	maxUpdateBytes = 64
+	defer func() { maxUpdateBytes = old }()
+
+	big := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(make([]byte, 200))
+	}))
+	defer big.Close()
+	dest := filepath.Join(t.TempDir(), "u.bin")
+	if err := downloadFileWithProgress(big.URL, dest, nil); err == nil {
+		t.Fatal("oversized update was accepted")
+	}
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Fatal("rejected update left a partial file behind")
+	}
+
+	small := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("tiny-update"))
+	}))
+	defer small.Close()
+	dest2 := filepath.Join(t.TempDir(), "u2.bin")
+	if err := downloadFileWithProgress(small.URL, dest2, func(int) {}); err != nil {
+		t.Fatalf("small update was rejected: %v", err)
+	}
+	data, err := os.ReadFile(dest2)
+	if err != nil || string(data) != "tiny-update" {
+		t.Fatalf("small update corrupted: %q, %v", data, err)
+	}
+}
+
+// Archive entries must never propagate elevated mode bits to disk: setuid,
+// setgid and sticky are stripped, plain executability maps to 0755/0644,
+// directories are always 0755.
+func TestSafeTarMode(t *testing.T) {
+	cases := []struct {
+		mode  int64
+		isDir bool
+		want  os.FileMode
+	}{
+		{0644, false, 0644},
+		{0755, false, 0755},
+		{0777, false, 0755},
+		{0600, false, 0644},
+		{04755, false, 0755},        // setuid executable
+		{02755, false, 0755},        // setgid executable
+		{0644 | 01000, false, 0644}, // sticky data file
+		{0, true, 0755},
+		{0777, true, 0755},
+	}
+	for _, c := range cases {
+		if got := safeTarMode(c.mode, c.isDir); got != c.want {
+			t.Errorf("safeTarMode(%#o, %v) = %#o, want %#o", c.mode, c.isDir, got, c.want)
+		}
 	}
 }

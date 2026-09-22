@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -232,6 +233,133 @@ func TestNotificationSettingsPersistAcrossRestarts(t *testing.T) {
 	}
 	if got := setNotifyOnDownload(true); got != true {
 		t.Errorf("setNotifyOnDownload(true) = %v, want true", got)
+	}
+}
+
+// The open-file bridge must stay jailed: only the download folder (with
+// monthly subfolders) and the internal preview dir may be opened from page
+// JavaScript — never arbitrary local files.
+func TestIsAllowedOpenPathJailsArbitraryFiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("APPDATA", home)
+	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv("HOME", home)
+
+	dl := t.TempDir()
+	s := loadSettings()
+	s.DownloadDir = dl
+	if err := saveSettings(s); err != nil {
+		t.Fatal(err)
+	}
+
+	inside := filepath.Join(dl, "report.pdf")
+	if err := os.WriteFile(inside, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	monthly := filepath.Join(dl, "2026-09", "photo.jpg")
+	if err := os.MkdirAll(filepath.Dir(monthly), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(monthly, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	preview := filepath.Join(os.TempDir(), "WAtchfulPreview", "doc.pdf")
+	for _, ok := range []string{inside, monthly, preview} {
+		if !isAllowedOpenPath(ok) {
+			t.Errorf("isAllowedOpenPath(%q) = false, want true", ok)
+		}
+	}
+	outside := filepath.Join(home, "secret.txt")
+	if err := os.WriteFile(outside, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	escape := filepath.Join(dl, "..", "secret.txt")
+	for _, bad := range []string{"", outside, escape, "/etc/passwd"} {
+		if isAllowedOpenPath(bad) {
+			t.Errorf("isAllowedOpenPath(%q) = true, want false", bad)
+		}
+	}
+}
+
+// Oversized attachments must be rejected from the encoded length alone,
+// before base64 decoding can transiently multiply memory use.
+func TestSaveDownloadedFileRejectsOversizedPayload(t *testing.T) {
+	old := maxAttachmentBytes
+	maxAttachmentBytes = 32
+	defer func() { maxAttachmentBytes = old }()
+
+	tempDir := t.TempDir()
+	big := "data:application/octet-stream;base64," + strings.Repeat("A", 48) // 48*3/4=36 > 32
+	if _, _, err := saveDownloadedFileToDir(tempDir, "big.bin", big); err == nil {
+		t.Fatal("oversized attachment was accepted")
+	}
+	if entries, _ := os.ReadDir(tempDir); len(entries) != 0 {
+		t.Fatalf("rejected save left %d files behind", len(entries))
+	}
+	small := "data:application/octet-stream;base64," + strings.Repeat("A", 16) // 12 <= 32
+	if _, _, err := saveDownloadedFileToDir(tempDir, "small.bin", small); err != nil {
+		t.Fatalf("small attachment was rejected: %v", err)
+	}
+}
+
+// The download folder must never point at sensitive locations: empty,
+// existing files, every blocklisted prefix, or a symlink (even dangling)
+// escaping into one.
+func TestValidateDownloadDirRejectsSensitiveLocations(t *testing.T) {
+	tempDir := t.TempDir()
+	if err := validateDownloadDir(tempDir); err != nil {
+		t.Errorf("valid temp dir rejected: %v", err)
+	}
+	if err := validateDownloadDir(""); err == nil {
+		t.Error("empty download dir accepted")
+	}
+	notDir := filepath.Join(tempDir, "file.txt")
+	if err := os.WriteFile(notDir, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDownloadDir(notDir); err == nil {
+		t.Error("existing file accepted as download dir")
+	}
+	prefixes := blockedDownloadDirPrefixes()
+	if len(prefixes) == 0 {
+		t.Fatal("blocklist is empty")
+	}
+	for _, p := range prefixes {
+		if err := validateDownloadDir(p); err == nil {
+			t.Errorf("blocklisted prefix accepted: %q", p)
+		}
+		if err := validateDownloadDir(filepath.Join(p, "sub")); err == nil {
+			t.Errorf("subfolder of blocklisted prefix accepted: %q", filepath.Join(p, "sub"))
+		}
+	}
+	// Symlink escape, dangling or not: link -> blocked must never validate.
+	link := filepath.Join(tempDir, "wa-link")
+	if err := os.Symlink(prefixes[0], link); err != nil {
+		t.Skipf("cannot create symlink (Windows needs privileges): %v", err)
+	}
+	if err := validateDownloadDir(filepath.Join(link, "sub")); err == nil {
+		t.Errorf("symlink escape into %q accepted", prefixes[0])
+	}
+}
+
+// A hostile settings.json pointing the download folder at a sensitive
+// location must fall back to the default instead of being honored.
+func TestLoadSettingsFallsBackOnHostileDownloadDir(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("APPDATA", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("HOME", dir)
+
+	prefixes := blockedDownloadDirPrefixes()
+	raw := `{"download_dir": ` + strconv.Quote(prefixes[0]) + `}`
+	if err := os.MkdirAll(getSettingsBaseDir(), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(getSettingsFilePath(), []byte(raw), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadSettings().DownloadDir; got != getDefaultDownloadDir() {
+		t.Fatalf("hostile download dir honored: %q", got)
 	}
 }
 

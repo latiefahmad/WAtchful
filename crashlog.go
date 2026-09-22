@@ -20,10 +20,24 @@ func crashLogPath() string {
 	return filepath.Join(getSettingsBaseDir(), "wa_crash.log")
 }
 
+// crashLogMaxBytes bounds the crash log: past this size it rotates to a
+// single backup, so a crash loop can never grow it without bound.
+var crashLogMaxBytes int64 = 1 << 20
+
+func rotateCrashLogIfNeeded(path string) {
+	info, err := os.Stat(path)
+	if err != nil || info.Size() < crashLogMaxBytes {
+		return
+	}
+	_ = os.Remove(path + ".1")
+	_ = os.Rename(path, path+".1")
+}
+
 func writeCrashReport(context string, recovered interface{}) {
 	stack := debug.Stack()
 	defer func() { _ = recover() }() // never let logging itself crash the app
 	_ = os.MkdirAll(filepath.Dir(crashLogPath()), 0755)
+	rotateCrashLogIfNeeded(crashLogPath())
 	f, err := os.OpenFile(crashLogPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		return
