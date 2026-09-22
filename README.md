@@ -1,4 +1,4 @@
-# WAtchful
+# WAtchful original dev https://github.com/vianziro/Whatsapp-Dekstop
 
 [![Release](https://img.shields.io/github/v/release/latiefahmad/WAtchful?label=release)](https://github.com/latiefahmad/WAtchful/releases/latest)
 [![Release build](https://github.com/latiefahmad/WAtchful/actions/workflows/build.yml/badge.svg)](https://github.com/latiefahmad/WAtchful/actions/workflows/build.yml)
