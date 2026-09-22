@@ -9,6 +9,29 @@ for the tagged version to GitHub **verbatim** as the release notes. Conventions:
 - Everything under the heading until the next `## [` heading is published as-is.
 - Write for end users: what is new, what is fixed, and which file to download.
 
+## [v2.0.8] - 2026-09-22
+
+### 🔒 Security
+
+- **Self-update locked to this repository's releases** — the updater refuses any download URL outside this repo's HTTPS release artifacts, so a page script can never point it at an arbitrary executable.
+- **Open-file bridge jailed** — files opened from page JavaScript must live inside the download folder (including monthly subfolders) or the internal preview directory; system files and `..` escapes are refused.
+- **Preview markup escaped** — filenames, paths and release titles in the document preview and update banner are HTML-escaped, closing an XSS path from crafted chat filenames into the privileged page.
+- **Size caps before allocation** — attachments over 1 GB are rejected from their encoded length before decoding, and update downloads over 512 MB are refused up front and mid-stream with no partial file left behind.
+- **Download folder validated** — system and autostart locations (including Windows Startup, symlink and dangling-link escapes) are rejected before anything is created, and a hostile settings file falls back to the default folder.
+- **Spreadsheet preview sanitized** — SheetJS table markup is scrubbed in an inert template (dangerous elements removed, only structural attributes kept), blocking crafted-cell markup injection.
+- **Linux: no elevated mode bits from update archives, DBus error format fixed.**
+
+### 🛠 Fixed
+
+- **`wa_crash.log` rotates** past 1 MB into a single backup, so a crash loop can no longer grow it without bound.
+- **Drag & drop recovery** — the highlight always clears (global drop/dragend/blur net), and file injection probes over several rounds, firing only into an input WhatsApp left empty.
+
+### 🔄 Updating
+
+Updates arrive automatically in-app: WAtchful checks for new releases shortly after startup and every 4 hours, then downloads, installs, and restarts itself — you only approve. Accept the banner when it appears, or download the file for your platform from this release manually.
+
+**Full Changelog**: https://github.com/latiefahmad/WAtchful/compare/v2.0.7...v2.0.8
+
 ## [v2.0.7] - 2026-09-22
 
 ### 🔔 Notifications

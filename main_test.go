@@ -809,6 +809,26 @@ func TestSettingsModalAndProfilesCardPlacement(t *testing.T) {
 	}
 }
 
+// Filenames and release titles in the preview modal and update banner come
+// from chat content or network metadata, so they must be HTML-escaped: a
+// name like '"><img src=x onerror=...>x.pdf' would otherwise execute in the
+// privileged page context that can reach every native bridge.
+func TestPreviewModalEscapesAttackerStrings(t *testing.T) {
+	script := getInitScript("test-agent")
+	for _, want := range []string{
+		"function escapeHtml(s)",
+		`title="' + escapeHtml(filename) + '">' + escapeHtml(filename)`,
+		`' + escapeHtml(filename) + '</h2>'`,
+		`' + escapeHtml(displayPath) + '</div>'`,
+		`title="' + escapeHtml(filename) + '"></iframe>'`,
+		`' + escapeHtml(titleText) + '</strong>'`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("preview escaping is missing %q", want)
+		}
+	}
+}
+
 // Choosing Download explicitly (viewer toolbar button, context-menu item,
 // download anchor) means save only: the in-app document preview is reserved
 // for clicking the document itself, and the blob hook must stand down while
@@ -828,5 +848,41 @@ func TestExplicitDownloadSuppressesPreview(t *testing.T) {
 	}
 	if strings.Count(script, "captureDownload(href, name, false)") != 2 {
 		t.Error("both anchor interceptions (prototype override + click capture) must save without preview")
+	}
+}
+
+// Spreadsheet cells are attacker-controlled: sheet_to_html must be
+// sanitized (inert template, banned elements removed, only structural
+// attributes kept) before the markup reaches the privileged page.
+func TestSpreadsheetPreviewSanitizesCellMarkup(t *testing.T) {
+	script := getInitScript("test-agent")
+	for _, want := range []string{
+		"function sanitizeSheetHtml(html)",
+		"document.createElement('template')",
+		"sanitizeSheetHtml(XLSX.utils.sheet_to_html",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("spreadsheet sanitizer is missing %q", want)
+		}
+	}
+}
+
+// A drop ending outside the chat zone (dialog, empty file list) must still
+// clear the highlight — the stuck class disables pointer events app-wide —
+// via the global drop/dragend/blur net; file injection probes over several
+// rounds and only fires into an input WhatsApp left empty.
+func TestDragDropRecoveryAndProbing(t *testing.T) {
+	script := getInitScript("test-agent")
+	for _, want := range []string{
+		"function resetDragState()",
+		"document.addEventListener('drop', resetDragState, true)",
+		"document.addEventListener('dragend', resetDragState, true)",
+		"window.addEventListener('blur', resetDragState)",
+		"rounds >= 8",
+		"fileInput.files.length === 0",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("drag-drop recovery is missing %q", want)
+		}
 	}
 }

@@ -24,7 +24,7 @@ The screenshots use blurred chat content to protect personal information.
 
 **[Download the latest release →](https://github.com/latiefahmad/WAtchful/releases/latest)** — the page detects your OS and highlights the right file.
 
-Latest published release: **v2.0.7** ([release notes](https://github.com/latiefahmad/WAtchful/releases/tag/v2.0.7))
+Latest published release: **v2.0.8** ([release notes](https://github.com/latiefahmad/WAtchful/releases/tag/v2.0.8))
 
 | Platform | Download |
 | --- | --- |
@@ -107,6 +107,11 @@ Default data locations (settings, profile registry, logs):
 - Linux: `~/.config/WAtchful/`
 
 Inside, the Default profile keeps its session in `UserData/`, and every other profile gets an isolated folder under `Profiles/<profile>/`. Installs upgraded from older versions keep using their existing `WhatsAppDesk/` folder, so no session is lost.
+
+## Version 2.0.8
+
+- Security hardening: updater locked to this repo's releases, open-file bridge jailed to the download folder, preview markup escaped, 1 GB attachment / 512 MB update caps, download folder validated against system and autostart locations, spreadsheet preview sanitized.
+- `wa_crash.log` rotates past 1 MB; drag & drop always clears its highlight and probes before injecting files.
 
 ## Version 2.0.7
 

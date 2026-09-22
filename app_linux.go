@@ -266,7 +266,7 @@ static void tray_method_call(GDBusConnection* conn, const gchar* sender, const g
 			GError* error = NULL;
 			GVariant* value = tray_get_property(conn, sender, object_path, iface, prop, &error, user_data);
 			if (error) {
-				g_dbus_method_invocation_return_error(invocation, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_PROPERTY, error->message);
+				g_dbus_method_invocation_return_error(invocation, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_PROPERTY, "%s", error->message);
 				g_error_free(error);
 			} else {
 				g_dbus_method_invocation_return_value(invocation, g_variant_new_tuple(&value, 1));

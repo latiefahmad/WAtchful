@@ -535,12 +535,24 @@ func getInitScript(ua string) string {
 				e.dataTransfer.dropEffect = 'copy';
 			}
 
-			async function handleDrop(e) {
-				e.preventDefault();
-				e.stopPropagation();
+			// A drop landing anywhere (dialog, settings modal, cloud
+			// placeholder with an empty file list) must clear the highlight:
+			// the class disables pointer events app-wide, so a stuck one
+			// silently eats every click until restart.
+			function resetDragState() {
 				dragCounter = 0;
 				var dz = getDropZone();
 				if (dz) dz.classList.remove('wa-drag-over');
+			}
+
+			function findFileInput() {
+				return document.querySelector('input[type="file"][accept*="*"], input[type="file"][accept*="image"], input[type="file"][accept*="video"], input[type="file"][accept*="document"], input[type="file"][accept*="audio"]');
+			}
+
+			async function handleDrop(e) {
+				e.preventDefault();
+				e.stopPropagation();
+				resetDragState();
 
 				var files = e.dataTransfer.files;
 				if (!files || files.length === 0) return;
@@ -549,9 +561,15 @@ func getInitScript(ua string) string {
 				var attachBtn = document.querySelector('[data-testid="clip"], [data-icon="clip"], [aria-label*="Attach"], [aria-label*="Lampirkan"]');
 				if (attachBtn) {
 					attachBtn.click();
-					// Wait for the file input to appear
-					setTimeout(function() {
-						var fileInput = document.querySelector('input[type="file"][accept*="*"], input[type="file"][accept*="image"], input[type="file"][accept*="video"], input[type="file"][accept*="document"], input[type="file"][accept*="audio"]');
+					// Probe for the file input over several rounds instead of
+					// a single fixed delay: when WhatsApp's editor mounts
+					// slower than one check, a single early injection lands a
+					// second copy over the batch WhatsApp already accepted.
+					// Inject only while the input is still empty.
+					var rounds = 0;
+					var probeTimer = setInterval(function() {
+						rounds++;
+						var fileInput = findFileInput();
 						if (fileInput && fileInput.files.length === 0) {
 							// Create a DataTransfer to set files on the input
 							var dt = new DataTransfer();
@@ -562,8 +580,11 @@ func getInitScript(ua string) string {
 							// Trigger change event
 							var event = new Event('change', { bubbles: true });
 							fileInput.dispatchEvent(event);
+							clearInterval(probeTimer);
+						} else if ((fileInput && fileInput.files.length > 0) || rounds >= 8) {
+							clearInterval(probeTimer);
 						}
-					}, 100);
+					}, 200);
 				}
 			}
 
@@ -574,6 +595,15 @@ func getInitScript(ua string) string {
 					dz.addEventListener('dragleave', handleDragLeave, true);
 					dz.addEventListener('dragover', handleDragOver, true);
 					dz.addEventListener('drop', handleDrop, true);
+				}
+				// Global safety net, registered once: any drop, drag
+				// cancellation, or window blur clears the highlight, even
+				// when the gesture ends outside the chat drop zone.
+				if (!initDragDrop.guarded) {
+					initDragDrop.guarded = true;
+					document.addEventListener('drop', resetDragState, true);
+					document.addEventListener('dragend', resetDragState, true);
+					window.addEventListener('blur', resetDragState);
 				}
 			}
 
@@ -727,6 +757,16 @@ func getInitScript(ua string) string {
 		// so a hand-rolled XML/CSV parser is no longer needed here.
 
 		// In-App Document Preview Modal Overlay (PDF, Excel, Word, Text)
+		// Filenames and paths here come from chat content or release
+		// metadata, so they must never be concatenated raw: a name like
+		// '"><img src=x onerror=...>x.pdf' would otherwise execute in the
+		// privileged page context that can reach every native bridge.
+		// Valid names render identically.
+		function escapeHtml(s) {
+			return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
+				return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+			});
+		}
 		function showInAppDocModal(filename, blobUrl, savedPath, dataUri, ownedBlobUrl) {
 			var existing = document.getElementById('wa-doc-modal-overlay');
 			if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
@@ -786,7 +826,7 @@ func getInitScript(ua string) string {
 				'<div style="display:flex;align-items:center;gap:10px;min-width:0;">' +
 				'  <span style="font-size:22px;">' + docIcon + '</span>' +
 				'  <div style="min-width:0;">' +
-				'    <strong style="font-size:13.5px;color:#e9edef;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block;max-width:420px;" title="' + filename + '">' + filename + '</strong>' +
+				'    <strong style="font-size:13.5px;color:#e9edef;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block;max-width:420px;" title="' + escapeHtml(filename) + '">' + escapeHtml(filename) + '</strong>' +
 				'    <span style="font-size:11px;color:#8696a0;">' + docTypeLabel + ' · Direct Preview</span>' +
 				'  </div>' +
 				'</div>' +
@@ -824,12 +864,12 @@ func getInitScript(ua string) string {
 				body.innerHTML = '' +
 					'<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px;text-align:center;">' +
 					'  <div style="font-size:64px;margin-bottom:16px;">' + docIcon + '</div>' +
-					'  <h2 style="color:#e9edef;font-size:18px;font-weight:600;margin:0 0 8px;max-width:540px;word-break:break-all;">' + filename + '</h2>' +
+					'  <h2 style="color:#e9edef;font-size:18px;font-weight:600;margin:0 0 8px;max-width:540px;word-break:break-all;">' + escapeHtml(filename) + '</h2>' +
 					'  <div style="color:#00a884;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:12px;">' + docTypeLabel + ' · Saved</div>' +
 					'  <p style="color:#8696a0;font-size:13px;max-width:460px;line-height:1.5;margin:0 0 16px;">' +
 					(hint || ('The ' + docTypeLabel + ' is saved on your computer. Click below to open it in your default application.')) +
 					'  </p>' +
-					'  <div style="font-family:monospace;font-size:11px;color:#8696a0;background:rgba(255,255,255,0.06);padding:6px 14px;border-radius:6px;max-width:520px;overflow:hidden;text-overflow:ellipsis;margin-bottom:24px;border:1px solid rgba(255,255,255,0.08);">' + displayPath + '</div>' +
+					'  <div style="font-family:monospace;font-size:11px;color:#8696a0;background:rgba(255,255,255,0.06);padding:6px 14px;border-radius:6px;max-width:520px;overflow:hidden;text-overflow:ellipsis;margin-bottom:24px;border:1px solid rgba(255,255,255,0.08);">' + escapeHtml(displayPath) + '</div>' +
 					'  <div style="display:flex;gap:12px;align-items:center;">' +
 					'    <button id="wa-btn-card-launch" style="background:#00a884;color:#111b21;border:none;padding:10px 24px;border-radius:8px;font-size:13.5px;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:6px;box-shadow:0 4px 12px rgba(0,168,132,0.3);">' +
 					openBtnText +
@@ -884,6 +924,37 @@ func getInitScript(ua string) string {
 
 			// Render a parsed spreadsheet workbook (from the bundled SheetJS library) as an
 			// HTML table, with a sheet-switcher tab bar when the workbook has multiple sheets.
+			// XLSX.utils.sheet_to_html escapes cell text but writes the raw value
+			// into a data-v attribute, so a cell whose value is '"><img src=x
+			// onerror=...>' closes the attribute early and injects live markup --
+			// reachable from any spreadsheet sent in a chat. Parse the generated
+			// markup inside an inert <template> (its content is a separate document
+			// fragment, so images do not load and handlers never fire) and drop
+			// every attribute we do not control, leaving cell content as text only.
+			function sanitizeSheetHtml(html) {
+				var tpl = document.createElement('template');
+				tpl.innerHTML = String(html == null ? '' : html);
+				// Elements a spreadsheet cell must never be able to introduce. The
+				// attribute pass below already strips on* handlers and src/href, but
+				// leaving an inert <img>/<iframe> behind would still be a rendering
+				// artifact, so remove them outright.
+				var banned = tpl.content.querySelectorAll('script,style,img,svg,iframe,frame,object,embed,link,meta,base,form,input,button,textarea,select,audio,video,source,track,math,template');
+				for (var b = banned.length - 1; b >= 0; b--) {
+					if (banned[b].parentNode) banned[b].parentNode.removeChild(banned[b]);
+				}
+				var nodes = tpl.content.querySelectorAll('*');
+				for (var i = 0; i < nodes.length; i++) {
+					var attrs = nodes[i].attributes;
+					for (var a = attrs.length - 1; a >= 0; a--) {
+						var attrName = attrs[a].name.toLowerCase();
+						// id carries our wa-xlsx-table styling hook; colspan and
+						// rowspan are structural. Everything else goes.
+						if (attrName === 'id' || attrName === 'colspan' || attrName === 'rowspan') continue;
+						nodes[i].removeAttribute(attrs[a].name);
+					}
+				}
+				return tpl.innerHTML;
+			}
 			function renderSpreadsheetPreview(workbook, activeSheetName) {
 				var sheetNames = (workbook && workbook.SheetNames) || [];
 				if (!sheetNames.length) {
@@ -892,7 +963,7 @@ func getInitScript(ua string) string {
 				}
 				var activeName = (activeSheetName && sheetNames.indexOf(activeSheetName) !== -1) ? activeSheetName : sheetNames[0];
 				var worksheet = workbook.Sheets[activeName];
-				var tableHtml = XLSX.utils.sheet_to_html(worksheet, { id: 'wa-xlsx-table' });
+				var tableHtml = sanitizeSheetHtml(XLSX.utils.sheet_to_html(worksheet, { id: 'wa-xlsx-table' }));
 
 				var tabsHtml = '';
 				if (sheetNames.length > 1) {
@@ -929,7 +1000,7 @@ func getInitScript(ua string) string {
 					pdfSrc = 'data:application/pdf;base64,' + dataUri.split(';base64,')[1];
 				}
 				if (pdfSrc) {
-					body.innerHTML = '<iframe src="' + pdfSrc + '" style="width:100%;height:100%;border:none;background:#525659;" title="' + filename + '"></iframe>';
+					body.innerHTML = '<iframe src="' + pdfSrc + '" style="width:100%;height:100%;border:none;background:#525659;" title="' + escapeHtml(filename) + '"></iframe>';
 				} else {
 					renderCardFallback();
 				}
@@ -1858,7 +1929,7 @@ func getInitScript(ua string) string {
 				msg.id = 'wa-update-text';
 				msg.style.cssText = 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12.5px;color:#d1d7db;';
 				var titleText = releaseTitle ? releaseTitle : ('WAtchful v' + latestVersion);
-				msg.innerHTML = 'Update available: <strong style="color:#e9edef;">' + titleText + '</strong>';
+				msg.innerHTML = 'Update available: <strong style="color:#e9edef;">' + escapeHtml(titleText) + '</strong>';
 
 				leftWrap.appendChild(badge);
 				leftWrap.appendChild(msg);
