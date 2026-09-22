@@ -58,10 +58,8 @@ func TestDownloadInterceptorCoalescesDuplicateRequests(t *testing.T) {
 	for _, want := range []string{
 		"var activeDownloadKeys = Object.create(null)",
 		"function downloadRequestKey(href, filename)",
-		"var activeDownloadSizes = {}",
-		"if (blob.size && activeDownloadSizes[blob.size])",
 		"activeDownloadKeys[requestKey] = { status: 'downloading' }",
-		"markDownloadComplete(requestKey, savedPath, blob.size)",
+		"markDownloadComplete(requestKey, savedPath)",
 		"releaseDownloadRequest(requestKey)",
 	} {
 		if !strings.Contains(script, want) {
@@ -177,6 +175,7 @@ func TestSettingsControlsRemainWired(t *testing.T) {
 	ids := []string{
 		"wa-theme-btn-dark", "wa-theme-btn-light", "wa-theme-btn-system",
 		"wa-action-toggle-priv", "wa-action-toggle-pin", "wa-action-toggle-mute", "wa-action-toggle-auto",
+		"wa-action-toggle-notif", "wa-action-toggle-dlnotif",
 		"wa-btn-change-folder", "wa-btn-open-folder", "wa-btn-reset-folder",
 		"wa-btn-check-updates-modal", "wa-btn-reload-modal", "wa-btn-hardref-modal", "wa-btn-onboard-modal",
 		"wa-btn-run-diagnostics", "wa-btn-show-shortcuts",
@@ -275,13 +274,33 @@ func TestProfilesUIInjectsAfterSettingsModal(t *testing.T) {
 	}
 }
 
-func TestDownloadDedupIndexIsCapped(t *testing.T) {
+func TestDownloadDedupReliesOnContentHash(t *testing.T) {
 	script := getInitScript("test-agent")
-	if !strings.Contains(script, "sizeKeys.length >= 100") {
-		t.Fatal("activeDownloadSizes must be capped to bound RAM in long sessions")
+	// The page-side size-keyed dedup index is gone (redundant bookkeeping):
+	// duplicate saves are refused natively by SHA-256 content hash, so the
+	// page must not keep any per-size download state.
+	for _, gone := range []string{
+		"activeDownloadSizes",
+		"sizeKeys.length",
+		"markDownloadComplete(requestKey, savedPath, blob.size)",
+	} {
+		if strings.Contains(script, gone) {
+			t.Errorf("size-based download dedup is back: %q", gone)
+		}
 	}
-	if strings.Contains(script, "if (blobSize) activeDownloadSizes[blobSize] = savedPath;") {
-		t.Fatal("uncapped activeDownloadSizes write is back")
+	if !strings.Contains(script, "refuses byte-identical") {
+		t.Error("the native SHA-256 dedup backstop must stay documented in the download flow")
+	}
+	// The native saver reports whether the bytes already existed, so the
+	// page can say "Already saved" instead of implying a fresh save.
+	for _, want := range []string{
+		"alreadyExisted",
+		"Already saved: '",
+		"File already saved: '",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("already-saved reporting is missing %q", want)
+		}
 	}
 }
 
@@ -787,5 +806,27 @@ func TestSettingsModalAndProfilesCardPlacement(t *testing.T) {
 	}
 	if strings.Contains(script, "modal.appendChild(card)") {
 		t.Error("profiles card must not be appended to the overlay; it detaches beside the panel")
+	}
+}
+
+// Choosing Download explicitly (viewer toolbar button, context-menu item,
+// download anchor) means save only: the in-app document preview is reserved
+// for clicking the document itself, and the blob hook must stand down while
+// an explicit download is recent so one action never saves+previews twice.
+func TestExplicitDownloadSuppressesPreview(t *testing.T) {
+	script := getInitScript("test-agent")
+	for _, want := range []string{
+		"lastExplicitDownloadAt = Date.now()",
+		"function isRecentExplicitDownload()",
+		"isDocBlob && !isRecentExplicitDownload()",
+		"captureDownload(href, name, false)",
+		"function isExplicitDownloadMenuItem(target)",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("explicit-download wiring is missing %q", want)
+		}
+	}
+	if strings.Count(script, "captureDownload(href, name, false)") != 2 {
+		t.Error("both anchor interceptions (prototype override + click capture) must save without preview")
 	}
 }

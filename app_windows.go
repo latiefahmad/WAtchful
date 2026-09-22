@@ -829,12 +829,12 @@ func setupProfileBindings(w webview2.WebView, ctx *profileViewContext) {
 	})
 
 	// Bind download, preview, and settings handlers
-	_ = w.Bind("saveDownloadedFileNative", func(filename, dataURI string) string {
-		path, err := saveDownloadedFile(filename, dataURI)
+	_ = w.Bind("saveDownloadedFileNative", func(filename, dataURI string) SaveResult {
+		path, existed, err := saveDownloadedFile(filename, dataURI)
 		if err != nil {
-			return ""
+			return SaveResult{}
 		}
-		return path
+		return SaveResult{Path: path, AlreadyExisted: existed}
 	})
 
 	_ = w.Bind("previewDocumentNative", func(filename, dataURI string) string {
@@ -948,6 +948,18 @@ func setupProfileBindings(w webview2.WebView, ctx *profileViewContext) {
 	})
 	_ = w.Bind("setBlurAvatarsNative", func(on bool) bool {
 		return setBlurAvatars(on)
+	})
+	_ = w.Bind("getNotificationsEnabledNative", func() bool {
+		return getNotificationsEnabled()
+	})
+	_ = w.Bind("setNotificationsEnabledNative", func(on bool) bool {
+		return setNotificationsEnabled(on)
+	})
+	_ = w.Bind("getNotifyOnDownloadNative", func() bool {
+		return getNotifyOnDownload()
+	})
+	_ = w.Bind("setNotifyOnDownloadNative", func(on bool) bool {
+		return setNotifyOnDownload(on)
 	})
 
 	// Multi-profile bindings (tabbed shell: in-process tab operations;

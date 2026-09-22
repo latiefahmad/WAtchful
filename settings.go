@@ -20,13 +20,14 @@ import (
 var downloadFileMu sync.Mutex
 
 type AppSettings struct {
-	DownloadDir       string `json:"download_dir"`
-	NotifyOnDownload  bool   `json:"notify_on_download"`
-	Theme             string `json:"theme"` // "dark", "light", "system"
-	OrganizeByMonth   bool   `json:"organize_by_month"`
-	SpellCheckEnabled bool   `json:"spell_check_enabled"`
-	SpellCheckLang    string `json:"spell_check_lang"`
-	BlurAvatars       bool   `json:"blur_avatars"`
+	DownloadDir          string `json:"download_dir"`
+	NotifyOnDownload     bool   `json:"notify_on_download"`
+	NotificationsEnabled bool   `json:"notifications_enabled"`
+	Theme                string `json:"theme"` // "dark", "light", "system"
+	OrganizeByMonth      bool   `json:"organize_by_month"`
+	SpellCheckEnabled    bool   `json:"spell_check_enabled"`
+	SpellCheckLang       string `json:"spell_check_lang"`
+	BlurAvatars          bool   `json:"blur_avatars"`
 	// Zoom is the page zoom factor (1.0 = 100%), persisted so the display
 	// size survives restarts. Zero means "never set" and loads as 1.0.
 	Zoom float64 `json:"zoom"`
@@ -94,12 +95,13 @@ func getSettingsFilePath() string {
 
 func loadSettings() *AppSettings {
 	s := &AppSettings{
-		DownloadDir:       getDefaultDownloadDir(),
-		NotifyOnDownload:  true,
-		Theme:             "dark",
-		SpellCheckEnabled: true,
-		SpellCheckLang:    "auto",
-		Zoom:              1.0,
+		DownloadDir:          getDefaultDownloadDir(),
+		NotifyOnDownload:     true,
+		NotificationsEnabled: true,
+		Theme:                "dark",
+		SpellCheckEnabled:    true,
+		SpellCheckLang:       "auto",
+		Zoom:                 1.0,
 	}
 	data, err := os.ReadFile(getSettingsFilePath())
 	if err != nil {
@@ -183,7 +185,7 @@ func getUniqueFilePath(dir, filename string) string {
 	}
 }
 
-func saveDownloadedFile(filename, dataURI string) (string, error) {
+func saveDownloadedFile(filename, dataURI string) (string, bool, error) {
 	settings := loadSettings()
 	dir := settings.DownloadDir
 	// Monthly organization keeps the downloads folder browsable over time;
@@ -236,6 +238,28 @@ func setBlurAvatars(on bool) bool {
 	return s.BlurAvatars
 }
 
+func getNotificationsEnabled() bool {
+	return loadSettings().NotificationsEnabled
+}
+
+func setNotificationsEnabled(on bool) bool {
+	s := loadSettings()
+	s.NotificationsEnabled = on
+	_ = saveSettings(s)
+	return s.NotificationsEnabled
+}
+
+func getNotifyOnDownload() bool {
+	return loadSettings().NotifyOnDownload
+}
+
+func setNotifyOnDownload(on bool) bool {
+	s := loadSettings()
+	s.NotifyOnDownload = on
+	_ = saveSettings(s)
+	return s.NotifyOnDownload
+}
+
 // fileExistsInDownloadDir reports whether filename exists anywhere the saver
 // could have placed it: directly in the downloads folder, or inside any
 // YYYY-MM subfolder created by monthly organization. The badge layer uses
@@ -268,9 +292,9 @@ func fileExistsInDownloadDir(filename string) bool {
 	return false
 }
 
-func saveDownloadedFileToDir(targetDir, filename, dataURI string) (string, error) {
+func saveDownloadedFileToDir(targetDir, filename, dataURI string) (string, bool, error) {
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create target directory: %w", err)
+		return "", false, fmt.Errorf("failed to create target directory: %w", err)
 	}
 
 	// Sanitize filename against directory traversal
@@ -289,7 +313,7 @@ func saveDownloadedFileToDir(targetDir, filename, dataURI string) (string, error
 		rawBytes, err = base64.StdEncoding.DecodeString(dataURI)
 	}
 	if err != nil {
-		return "", fmt.Errorf("failed to decode base64: %w", err)
+		return "", false, fmt.Errorf("failed to decode base64: %w", err)
 	}
 
 	return saveDownloadedBytesToDir(targetDir, filename, rawBytes)
@@ -312,7 +336,16 @@ func fileMatchesBytes(path string, expected []byte, expectedHash [sha256.Size]by
 	return bytes.Equal(h.Sum(nil), expectedHash[:])
 }
 
-func saveDownloadedBytesToDir(targetDir, filename string, rawBytes []byte) (string, error) {
+// SaveResult is the saveDownloadedFileNative bridge payload: the on-disk
+// path plus whether those exact bytes were already there (SHA-256 content
+// match), so the page can report "Already saved" instead of implying a
+// fresh save. Path is empty when the save failed.
+type SaveResult struct {
+	Path           string `json:"path"`
+	AlreadyExisted bool   `json:"already_existed"`
+}
+
+func saveDownloadedBytesToDir(targetDir, filename string, rawBytes []byte) (string, bool, error) {
 	downloadFileMu.Lock()
 	defer downloadFileMu.Unlock()
 
@@ -331,7 +364,7 @@ func saveDownloadedBytesToDir(targetDir, filename string, rawBytes []byte) (stri
 		targetPath := filepath.Join(targetDir, candidateName)
 
 		if fileMatchesBytes(targetPath, rawBytes, expectedHash) {
-			return targetPath, nil
+			return targetPath, true, nil
 		}
 
 		out, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
@@ -339,7 +372,7 @@ func saveDownloadedBytesToDir(targetDir, filename string, rawBytes []byte) (stri
 			continue
 		}
 		if err != nil {
-			return "", fmt.Errorf("failed to create download: %w", err)
+			return "", false, fmt.Errorf("failed to create download: %w", err)
 		}
 
 		_, copyErr := io.Copy(out, bytes.NewReader(rawBytes))
@@ -347,11 +380,11 @@ func saveDownloadedBytesToDir(targetDir, filename string, rawBytes []byte) (stri
 		if copyErr != nil || closeErr != nil {
 			_ = os.Remove(targetPath)
 			if copyErr != nil {
-				return "", fmt.Errorf("failed to save file: %w", copyErr)
+				return "", false, fmt.Errorf("failed to save file: %w", copyErr)
 			}
-			return "", fmt.Errorf("failed to close saved file: %w", closeErr)
+			return "", false, fmt.Errorf("failed to close saved file: %w", closeErr)
 		}
-		return targetPath, nil
+		return targetPath, false, nil
 	}
 }
 
@@ -373,7 +406,7 @@ func previewDocument(filename, dataURI string) (string, error) {
 	tempDir := filepath.Join(os.TempDir(), "WAtchfulPreview")
 	_ = os.MkdirAll(tempDir, 0755)
 
-	targetPath, err := saveDownloadedFileToDir(tempDir, filename, dataURI)
+	targetPath, _, err := saveDownloadedFileToDir(tempDir, filename, dataURI)
 	if err != nil {
 		return "", err
 	}

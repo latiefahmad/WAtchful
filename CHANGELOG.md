@@ -9,6 +9,25 @@ for the tagged version to GitHub **verbatim** as the release notes. Conventions:
 - Everything under the heading until the next `## [` heading is published as-is.
 - Write for end users: what is new, what is fixed, and which file to download.
 
+## [v2.0.7] - 2026-09-22
+
+### 🔔 Notifications
+
+- **Desktop notification on/off switch** — a new Settings card enables or disables OS-level alerts for new chat messages (including service-worker and update notifications), persisted across restarts. Ports upstream's notification controls.
+- **Download notifications switch** — activates the long-stored `notify_on_download` flag, which previously had no reader: turn off download popups while keeping error alerts, which always show.
+
+### 📥 Downloads
+
+- **Explicit Download no longer opens a preview** — clicking Download itself (viewer toolbar button, context-menu item, download link) now saves only; the in-app document preview is reserved for clicking the document. Ports upstream's explicit-download behavior, including the guard against save+preview double-handling.
+- **"Already saved" is back and accurate** — the saver bridge now reports whether the exact bytes already existed (SHA-256 content match) instead of guessing by file size, so repeat downloads truthfully toast "Already saved" with no `name (1).ext` copies.
+- **Removed the redundant size-based dedup index** — duplicate refusal lives natively in the SHA-256 saver; the page no longer keeps per-size download state.
+
+### 🔄 Updating
+
+Updates arrive automatically in-app: WAtchful checks for new releases shortly after startup and every 4 hours, then downloads, installs, and restarts itself — you only approve. Accept the banner when it appears, or download the file for your platform from this release manually.
+
+**Full Changelog**: https://github.com/latiefahmad/WAtchful/compare/v2.0.6...v2.0.7
+
 ## [v2.0.6] - 2026-09-19
 
 ### 🛠 Fixed

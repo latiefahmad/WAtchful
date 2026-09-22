@@ -24,7 +24,7 @@ The screenshots use blurred chat content to protect personal information.
 
 **[Download the latest release →](https://github.com/latiefahmad/WAtchful/releases/latest)** — the page detects your OS and highlights the right file.
 
-Latest published release: **v2.0.4** ([release notes](https://github.com/latiefahmad/WAtchful/releases/tag/v2.0.4))
+Latest published release: **v2.0.7** ([release notes](https://github.com/latiefahmad/WAtchful/releases/tag/v2.0.7))
 
 | Platform | Download |
 | --- | --- |
@@ -107,6 +107,20 @@ Default data locations (settings, profile registry, logs):
 - Linux: `~/.config/WAtchful/`
 
 Inside, the Default profile keeps its session in `UserData/`, and every other profile gets an isolated folder under `Profiles/<profile>/`. Installs upgraded from older versions keep using their existing `WhatsAppDesk/` folder, so no session is lost.
+
+## Version 2.0.7
+
+- Desktop notification on/off switch and download notification switch in Settings (activates the previously unused `notify_on_download` flag).
+- Explicit Download saves without opening a preview; repeat downloads truthfully report "Already saved" via native SHA-256 content match.
+- Removed the redundant page-side size-based download dedup index.
+
+## Version 2.0.6
+
+- Fixed the tab-switch pump deadlock ("Not responding"): re-entrant tab mutex, timeout-guarded second-launch IPC, 3-minute controller settle gate before teardown, and a pump watchdog dumping stacks to Temp on stalls.
+
+## Version 2.0.5
+
+- Privacy mode also redacts links and URLs inside chat rows and message bubbles.
 
 ## Version 2.0.4
 

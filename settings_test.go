@@ -44,9 +44,12 @@ func TestSaveDownloadedFile(t *testing.T) {
 	testContent := "WAtchful Light Media Test"
 	b64 := "data:text/plain;base64," + base64.StdEncoding.EncodeToString([]byte(testContent))
 
-	savedPath, err := saveDownloadedFileToDir(tempDir, "sample_notes.txt", b64)
+	savedPath, existed, err := saveDownloadedFileToDir(tempDir, "sample_notes.txt", b64)
 	if err != nil {
 		t.Fatalf("saveDownloadedFileToDir failed: %v", err)
+	}
+	if existed {
+		t.Error("fresh save must report alreadyExisted=false")
 	}
 
 	if !strings.HasPrefix(savedPath, tempDir) {
@@ -67,13 +70,19 @@ func TestSaveDownloadedFileReusesIdenticalDownload(t *testing.T) {
 	content := []byte("same WhatsApp attachment")
 	b64 := "data:application/octet-stream;base64," + base64.StdEncoding.EncodeToString(content)
 
-	first, err := saveDownloadedFileToDir(tempDir, "document.pdf", b64)
+	first, firstExisted, err := saveDownloadedFileToDir(tempDir, "document.pdf", b64)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := saveDownloadedFileToDir(tempDir, "document.pdf", b64)
+	if firstExisted {
+		t.Error("first save must report alreadyExisted=false")
+	}
+	second, secondExisted, err := saveDownloadedFileToDir(tempDir, "document.pdf", b64)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !secondExisted {
+		t.Error("identical re-save must report alreadyExisted=true")
 	}
 	if second != first {
 		t.Fatalf("identical download created a duplicate: first=%q second=%q", first, second)
@@ -93,13 +102,19 @@ func TestSaveDownloadedFileKeepsDifferentContent(t *testing.T) {
 		return "data:text/plain;base64," + base64.StdEncoding.EncodeToString([]byte(value))
 	}
 
-	first, err := saveDownloadedFileToDir(tempDir, "report.txt", encode("first"))
+	first, firstExisted, err := saveDownloadedFileToDir(tempDir, "report.txt", encode("first"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := saveDownloadedFileToDir(tempDir, "report.txt", encode("second"))
+	if firstExisted {
+		t.Error("first save must report alreadyExisted=false")
+	}
+	second, secondExisted, err := saveDownloadedFileToDir(tempDir, "report.txt", encode("second"))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if secondExisted {
+		t.Error("different content must report alreadyExisted=false")
 	}
 	if second == first || filepath.Base(second) != "report (1).txt" {
 		t.Fatalf("different content must be preserved separately, got %q", second)
@@ -182,5 +197,61 @@ func TestGetSettingsBaseDirPrefersLegacyFolder(t *testing.T) {
 	fresh := filepath.Join(cfgRoot, appBaseDirName)
 	if got := getSettingsBaseDir(); got != fresh {
 		t.Fatalf("getSettingsBaseDir() = %q, want fresh %q", got, fresh)
+	}
+}
+
+// Both notification switches default to on, persist across restarts, and
+// round-trip through the settings file. Older settings.json files predate
+// these keys, so a fresh file must still read back as enabled.
+func TestNotificationSettingsPersistAcrossRestarts(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("APPDATA", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("HOME", dir)
+
+	if got := getNotificationsEnabled(); got != true {
+		t.Fatalf("fresh notifications = %v, want true", got)
+	}
+	if got := getNotifyOnDownload(); got != true {
+		t.Fatalf("fresh notify-on-download = %v, want true", got)
+	}
+	if got := setNotificationsEnabled(false); got != false {
+		t.Fatalf("setNotificationsEnabled(false) = %v, want false", got)
+	}
+	if got := setNotifyOnDownload(false); got != false {
+		t.Fatalf("setNotifyOnDownload(false) = %v, want false", got)
+	}
+	if got := loadSettings().NotificationsEnabled; got != false {
+		t.Fatalf("reloaded notifications = %v, want false", got)
+	}
+	if got := loadSettings().NotifyOnDownload; got != false {
+		t.Fatalf("reloaded notify-on-download = %v, want false", got)
+	}
+	if got := setNotificationsEnabled(true); got != true {
+		t.Errorf("setNotificationsEnabled(true) = %v, want true", got)
+	}
+	if got := setNotifyOnDownload(true); got != true {
+		t.Errorf("setNotifyOnDownload(true) = %v, want true", got)
+	}
+}
+
+// Every platform shell must expose the notification bridges the Settings
+// cards call; a missing binding leaves the toggle promise hanging forever.
+func TestNotificationBindingsPresentOnAllPlatforms(t *testing.T) {
+	for _, file := range []string{"app_windows.go", "app_darwin.go", "app_linux.go"} {
+		src, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{
+			`"getNotificationsEnabledNative"`,
+			`"setNotificationsEnabledNative"`,
+			`"getNotifyOnDownloadNative"`,
+			`"setNotifyOnDownloadNative"`,
+		} {
+			if !strings.Contains(string(src), want) {
+				t.Errorf("%s is missing binding %s", file, want)
+			}
+		}
 	}
 }

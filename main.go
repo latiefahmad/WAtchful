@@ -113,10 +113,44 @@ func getInitScript(ua string) string {
 
 		// Native Notification Polyfill & ServiceWorker Notification Interceptor
 		(function() {
+			// Desktop notification master switch (Settings card, persisted
+			// natively). Gated at dispatch so every path — page Notification,
+			// service-worker showNotification, update banner — obeys one flag.
+			var notificationsEnabled = true;
+			var notificationsStateReady = false;
+			window.isNotificationsEnabled = function() {
+				return notificationsStateReady && notificationsEnabled;
+			};
+			window.setNotificationsEnabled = function(enabled) {
+				enabled = !!enabled;
+				if (!window.setNotificationsEnabledNative) {
+					notificationsEnabled = enabled;
+					notificationsStateReady = true;
+					return Promise.resolve(notificationsEnabled);
+				}
+				return Promise.resolve(window.setNotificationsEnabledNative(enabled)).then(function(saved) {
+					notificationsEnabled = !!saved;
+					notificationsStateReady = true;
+					return notificationsEnabled;
+				});
+			};
+			window.refreshNotificationsEnabled = function() {
+				if (!window.getNotificationsEnabledNative) {
+					notificationsStateReady = true;
+					return Promise.resolve(notificationsEnabled);
+				}
+				return Promise.resolve(window.getNotificationsEnabledNative()).then(function(saved) {
+					notificationsEnabled = !!saved;
+					notificationsStateReady = true;
+					return notificationsEnabled;
+				});
+			};
+			window.refreshNotificationsEnabled();
+
 			function dispatchNativeNotification(title, options) {
 				options = options || {};
 				var body = options.body || '';
-				if (window.sendNativeNotification) {
+				if (notificationsStateReady && notificationsEnabled && window.sendNativeNotification) {
 					window.sendNativeNotification(title, body);
 				}
 			}
@@ -311,6 +345,15 @@ func getInitScript(ua string) string {
 		// Track clicked document filenames with robust regex matching
 		var lastClickedDocName = '';
 		var lastDocumentIntentAt = 0;
+		// Explicit-download marker (upstream #18): clicking Download itself
+		// (viewer button, context-menu item, download anchor) means save
+		// only — the in-app preview is reserved for clicking the document.
+		// The blob hook below stands down while this is recent so one user
+		// action never saves+previews twice.
+		var lastExplicitDownloadAt = 0;
+		function isRecentExplicitDownload() {
+			return (Date.now() - lastExplicitDownloadAt) < 6000;
+		}
 		function extractDocumentName(el) {
 			if (!el || typeof el.closest !== 'function') return '';
 			// NEVER extract document names from inside the media viewer, modal dialogs, or top toolbars
@@ -1016,11 +1059,12 @@ func getInitScript(ua string) string {
 
 			document.getElementById('wa-btn-save-doc').onclick = function() {
 				if (dataUri && window.saveDownloadedFileNative) {
-					window.saveDownloadedFileNative(filename, dataUri).then(function(p) {
-						if (p) showFloatingToast('💾 Saved: ' + filename);
+					window.saveDownloadedFileNative(filename, dataUri).then(function(res) {
+						var p = res && res.path;
+						if (p) showDownloadToast(((res && res.alreadyExisted) ? '💾 Already saved: ' : '💾 Saved: ') + filename);
 					});
 				} else if (savedPath) {
-					showFloatingToast('💾 File is saved at: ' + savedPath);
+					showDownloadToast('💾 File is saved at: ' + savedPath);
 				}
 			};
 
@@ -1062,7 +1106,7 @@ func getInitScript(ua string) string {
 					bType === 'text/csv' || bType === 'text/plain' ||
 					(blob && (blob.type === 'application/octet-stream' || bType === '') && isRecentPDFIntent());
 
-				if (blob && isDocBlob) {
+				if (blob && isDocBlob && !isRecentExplicitDownload()) {
 					var name = lastClickedDocName || 'document';
 					if (!name.includes('.')) {
 						if (bType.indexOf('pdf') >= 0) name += '.pdf';
@@ -1077,10 +1121,11 @@ func getInitScript(ua string) string {
 					reader.onloadend = function() {
 						var base64data = reader.result;
 						if (window.saveDownloadedFileNative) {
-							window.saveDownloadedFileNative(name, base64data).then(function(savedPath) {
+							window.saveDownloadedFileNative(name, base64data).then(function(res) {
+								var savedPath = (res && res.path) || '';
 								showInAppDocModal(name, ownedBlobUrl, savedPath, base64data, ownedBlobUrl);
 								dismissStuckViewer();
-								showFloatingToast('📄 Document preview: ' + name);
+								showDownloadToast(((res && res.alreadyExisted) ? '📄 Already saved: ' : '📄 Document preview: ') + name);
 							});
 						} else {
 							showInAppDocModal(name, ownedBlobUrl, '', base64data, ownedBlobUrl);
@@ -1105,10 +1150,11 @@ func getInitScript(ua string) string {
 					reader.onloadend = function() {
 						var base64data = reader.result;
 						if (window.saveDownloadedFileNative) {
-							window.saveDownloadedFileNative(name, base64data).then(function(savedPath) {
+							window.saveDownloadedFileNative(name, base64data).then(function(res) {
+								var savedPath = (res && res.path) || '';
 								showInAppDocModal(name, ownedBlobUrl, savedPath, base64data, ownedBlobUrl);
 								dismissStuckViewer();
-								showFloatingToast('📄 Document preview: ' + name);
+								showDownloadToast(((res && res.alreadyExisted) ? '📄 Already saved: ' : '📄 Document preview: ') + name);
 							});
 						} else {
 							showInAppDocModal(name, ownedBlobUrl, '', base64data, ownedBlobUrl);
@@ -1321,6 +1367,45 @@ func getInitScript(ua string) string {
 				toast.style.transform = 'translateX(-50%) translateY(0)';
 				toast.style.pointerEvents = 'none';
 			}, action ? 6000 : 2500);
+		}
+
+		// Download feedback switch (Settings card, persisted natively as the
+		// long-stored notify_on_download flag, which previously had no reader).
+		// Completion/progress popups go through showDownloadToast; errors
+		// always use showFloatingToast directly so failures are never silent.
+		var notifyOnDownload = true;
+		var notifyOnDownloadReady = false;
+		window.isNotifyOnDownload = function() {
+			return notifyOnDownloadReady && notifyOnDownload;
+		};
+		window.setNotifyOnDownload = function(on) {
+			on = !!on;
+			if (!window.setNotifyOnDownloadNative) {
+				notifyOnDownload = on;
+				notifyOnDownloadReady = true;
+				return Promise.resolve(notifyOnDownload);
+			}
+			return Promise.resolve(window.setNotifyOnDownloadNative(on)).then(function(saved) {
+				notifyOnDownload = !!saved;
+				notifyOnDownloadReady = true;
+				return notifyOnDownload;
+			});
+		};
+		window.refreshNotifyOnDownload = function() {
+			if (!window.getNotifyOnDownloadNative) {
+				notifyOnDownloadReady = true;
+				return Promise.resolve(notifyOnDownload);
+			}
+			return Promise.resolve(window.getNotifyOnDownloadNative()).then(function(saved) {
+				notifyOnDownload = !!saved;
+				notifyOnDownloadReady = true;
+				return notifyOnDownload;
+			});
+		};
+		window.refreshNotifyOnDownload();
+		function showDownloadToast(msg, action) {
+			if (window.isNotifyOnDownload && !window.isNotifyOnDownload()) return;
+			showFloatingToast(msg, action);
 		}
 
 		// Issue reporter: page errors are buffered locally (never uploaded),
@@ -1827,7 +1912,7 @@ func getInitScript(ua string) string {
 				if (bannerParent) bannerParent.appendChild(banner);
 
 				try {
-					if (window.sendNativeNotification) {
+					if ((!window.isNotificationsEnabled || window.isNotificationsEnabled()) && window.sendNativeNotification) {
 						var notifTitle = 'Update Available';
 						var notifBody = 'WAtchful v' + latestVersion + ' is available. Click to update the application.';
 						window.sendNativeNotification(notifTitle, notifBody);
@@ -2179,10 +2264,7 @@ func getInitScript(ua string) string {
 				return String(filename || '') + '\n' + String(href || '');
 			}
 
-			// Same file arrives through different blob URLs depending on which
-			// path triggered it (bubble click, viewer download button, anchor
-			// intercept), so dedup by content length instead of the URL.
-			var activeDownloadSizes = {};				function releaseDownloadRequest(requestKey, immediately) {
+			function releaseDownloadRequest(requestKey, immediately) {
 					delete activeDownloadKeys[requestKey];
 					// Every release path is an exit of an in-flight download:
 					// clear the recycler gate (clamped at zero on the host side).
@@ -2196,21 +2278,11 @@ func getInitScript(ua string) string {
 					label: 'Open folder',
 					onClick: function() { window.openDownloadDirNative(); }
 				};
-			}				function markDownloadComplete(requestKey, savedPath, blobSize) {						var completedRequest = { status: 'complete', savedPath: savedPath };
+			}				function markDownloadComplete(requestKey, savedPath) {						var completedRequest = { status: 'complete', savedPath: savedPath };
 						activeDownloadKeys[requestKey] = completedRequest;
 						// Save finished: bytes are on disk. Clear the recycler gate;
-						// the key lingers only for dedup toasts.
+						// the key lingers only for in-flight coalescing below.
 						if (window.__waReportBusy) window.__waReportBusy('download', false);
-					if (blobSize) {
-						// Cap the dedup index: one entry per distinct downloaded size is
-						// otherwise a slow RAM leak in long-lived sessions. Dropping the
-						// smallest cached size only risks one redundant re-save.
-						var sizeKeys = Object.keys(activeDownloadSizes);
-						if (sizeKeys.length >= 100 && sizeKeys[0] !== String(blobSize)) {
-							delete activeDownloadSizes[sizeKeys[0]];
-						}
-						activeDownloadSizes[blobSize] = savedPath;
-					}
 				// Tell the badge layer this filename is now on disk so the next
 				// scan badges it without a redundant native stat.
 				var savedBase = (savedPath || '').split(/[\\/]/).pop();
@@ -2247,30 +2319,17 @@ func getInitScript(ua string) string {
 				// The renderer recycler must not rebuild while bytes are in
 				// flight: the fetch would die with the old renderer.
 				if (window.__waReportBusy) window.__waReportBusy('download', true);
-				showFloatingToast(isDoc ? ('📄 Opening preview: ' + filename + '...') : ('⏳ Downloading: ' + filename + '...'));
+				showDownloadToast(isDoc ? ('📄 Opening preview: ' + filename + '...') : ('⏳ Downloading: ' + filename + '...'));
 
 				fetch(href)
 					.then(function(response) {
 						return response.blob();
 					})
 					.then(function(blob) {
-						// Content-level dedup: identical file via a different blob
-						// URL (second click, viewer button) was previously saved
-						// again as "name (1).ext". The Go saver also refuses
-						// byte-identical duplicates as a final backstop.
-					if (blob.size && activeDownloadSizes[blob.size]) {
-						var savedPath = activeDownloadSizes[blob.size];
-							if (window.__waMarkSaved) window.__waMarkSaved(filename);
-							showFloatingToast(shouldAutoOpen ? ('📄 Already saved: ' + filename) : ('💾 File already saved: ' + filename), openFolderAction());
-							if (shouldAutoOpen) {
-								var isPdfDup = filename.toLowerCase().endsWith('.pdf');
-								var dupBlobUrl = isPdfDup ? origCreateObjectURL(blob.slice(0, blob.size, 'application/pdf')) : '';
-								showInAppDocModal(filename, dupBlobUrl || href, savedPath, '', dupBlobUrl);
-								if (window.dismissStuckViewer) window.dismissStuckViewer();
-							}
-							releaseDownloadRequest(requestKey);
-							return;
-						}
+						// Duplicate clicks (second click, viewer button) simply
+						// save again: the native saver refuses byte-identical
+						// duplicates by SHA-256 content hash and returns the
+						// existing path, so no "name (1).ext" copy is created.
 						var isPdf = filename.toLowerCase().endsWith('.pdf');
 						var previewBlob = isPdf ? blob.slice(0, blob.size, 'application/pdf') : blob;
 						var ownedBlobUrl = isPdf ? origCreateObjectURL(previewBlob) : '';
@@ -2278,15 +2337,17 @@ func getInitScript(ua string) string {
 						reader.onloadend = function() {
 							var base64data = reader.result;
 							if (window.saveDownloadedFileNative) {
-								window.saveDownloadedFileNative(filename, base64data).then(function(savedPath) {
+								window.saveDownloadedFileNative(filename, base64data).then(function(res) {
+									var savedPath = res && res.path;
 									if (savedPath) {
-										markDownloadComplete(requestKey, savedPath, blob.size);
+										var alreadySaved = !!(res && res.alreadyExisted);
+										markDownloadComplete(requestKey, savedPath);
 										if (shouldAutoOpen) {
 											showInAppDocModal(filename, ownedBlobUrl || href, savedPath, base64data, ownedBlobUrl);
 											if (window.dismissStuckViewer) window.dismissStuckViewer();
-											showFloatingToast('📄 Preview opened: ' + filename, openFolderAction());
+											showDownloadToast((alreadySaved ? '📄 Already saved: ' : '📄 Preview opened: ') + filename, openFolderAction());
 										} else {
-											showFloatingToast('💾 Saved successfully: ' + filename, openFolderAction());
+											showDownloadToast((alreadySaved ? '💾 File already saved: ' : '💾 Saved successfully: ') + filename, openFolderAction());
 										}
 									} else {
 										if (ownedBlobUrl) URL.revokeObjectURL(ownedBlobUrl);
@@ -2330,6 +2391,24 @@ func getInitScript(ua string) string {
 				'[data-icon="download-refreshed"]',
 				'[data-icon*="download"]'
 			].join(',');
+
+			// Stamp explicit Download clicks (viewer toolbar button or context
+			// menu item) so the blob hook stands down: the anchor path above
+			// already saved the file, and a second preview must not open.
+			function isExplicitDownloadMenuItem(target) {
+				if (!target || !target.closest) return false;
+				var item = target.closest('[role="menuitem"]');
+				if (!item) return false;
+				var label = ((item.innerText || '') + ' ' + (item.getAttribute('aria-label') || '')).toLowerCase();
+				return label.indexOf('download') !== -1 || label.indexOf('unduh') !== -1;
+			}
+			document.addEventListener('click', function(e) {
+				var target = e.target;
+				if (target && target.closest &&
+					(target.closest(viewerDownloadSelector) || isExplicitDownloadMenuItem(target))) {
+					lastExplicitDownloadAt = Date.now();
+				}
+			}, true);
 
 			function findVisibleViewerDownloadControl() {
 				var candidates = document.querySelectorAll(viewerDownloadSelector);
@@ -2384,7 +2463,10 @@ func getInitScript(ua string) string {
 				var href = this.href || this.getAttribute('href');
 				if ((downloadAttr !== null || this.download) && href && (href.indexOf('blob:') === 0 || href.indexOf('data:') === 0)) {
 					var name = downloadAttr || this.download || lastClickedDocName || 'whatsapp_media';
-					captureDownload(href, name, isDocumentFileName(name));
+					// An explicit download anchor means save only. Opening a document
+					// preview is reserved for clicking the document itself.
+					lastExplicitDownloadAt = Date.now();
+					captureDownload(href, name, false);
 					return;
 				}
 				return originalAnchorClick.apply(this, arguments);
@@ -2401,7 +2483,9 @@ func getInitScript(ua string) string {
 							e.preventDefault();
 							e.stopPropagation();
 							var name = downloadAttr || target.download || lastClickedDocName || 'whatsapp_media';
-							captureDownload(href, name, isDocumentFileName(name));
+							// The user clicked Download directly: do not open a second preview.
+							lastExplicitDownloadAt = Date.now();
+							captureDownload(href, name, false);
 							return;
 						}
 					}
@@ -3007,6 +3091,40 @@ func getInitScript(ua string) string {
 					'</div>';
 				quickGrid.appendChild(cardMute);
 
+				// Card 3b: Desktop Notifications
+				var cardNotif = document.createElement('div');
+				cardNotif.className = 'wa-modal-card';
+				cardNotif.style.cssText = 'border-radius:0;border-width:0 0 1px;border-style:solid;padding:12px 0;display:flex;align-items:center;justify-content:space-between;gap:16px;';
+				cardNotif.innerHTML = '' +
+					'<div>' +
+					'  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px;">' +
+					'    <strong class="wa-text-primary" style="font-size:12.5px;">Desktop Notifications</strong>' +
+					'    <span id="wa-badge-notif" style="font-size:10px;padding:1px 5px;border-radius:4px;font-weight:600;">...</span>' +
+					'  </div>' +
+					'  <div class="wa-text-muted" style="font-size:11px;">Show OS-level alerts for new chat messages.</div>' +
+					'</div>' +
+					'<div style="display:flex;align-items:center;justify-content:space-between;">' +
+					'  <button id="wa-action-toggle-notif" class="wa-card-btn" style="padding:4px 10px;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;border-width:1px;border-style:solid;">Toggle</button>' +
+					'</div>';
+				quickGrid.appendChild(cardNotif);
+
+				// Card 3c: Download Notifications
+				var cardDlNotif = document.createElement('div');
+				cardDlNotif.className = 'wa-modal-card';
+				cardDlNotif.style.cssText = 'border-radius:0;border-width:0 0 1px;border-style:solid;padding:12px 0;display:flex;align-items:center;justify-content:space-between;gap:16px;';
+				cardDlNotif.innerHTML = '' +
+					'<div>' +
+					'  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px;">' +
+					'    <strong class="wa-text-primary" style="font-size:12.5px;">Download Notifications</strong>' +
+					'    <span id="wa-badge-dlnotif" style="font-size:10px;padding:1px 5px;border-radius:4px;font-weight:600;">...</span>' +
+					'  </div>' +
+					'  <div class="wa-text-muted" style="font-size:11px;">Show a popup when a chat file finishes downloading.</div>' +
+					'</div>' +
+					'<div style="display:flex;align-items:center;justify-content:space-between;">' +
+					'  <button id="wa-action-toggle-dlnotif" class="wa-card-btn" style="padding:4px 10px;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;border-width:1px;border-style:solid;">Toggle</button>' +
+					'</div>';
+				quickGrid.appendChild(cardDlNotif);
+
 				// Card 4: Auto-Start
 				var cardAuto = document.createElement('div');
 				cardAuto.className = 'wa-modal-card';
@@ -3233,6 +3351,26 @@ func getInitScript(ua string) string {
 						btnMute.textContent = muteActive ? 'Unmute' : 'Mute';
 					}
 
+					var notifActive = window.isNotificationsEnabled ? window.isNotificationsEnabled() : true;
+					var badgeNotif = document.getElementById('wa-badge-notif');
+					var btnNotif = document.getElementById('wa-action-toggle-notif');
+					if (badgeNotif && btnNotif) {
+						badgeNotif.textContent = notifActive ? 'Enabled' : 'Disabled';
+						badgeNotif.style.background = notifActive ? (isThemeDark ? 'rgba(0,168,132,0.15)' : 'rgba(0,128,105,0.15)') : 'transparent';
+						badgeNotif.style.color = notifActive ? accent : '#8696a0';
+						btnNotif.textContent = notifActive ? 'Disable' : 'Enable';
+					}
+
+					var dlNotifActive = window.isNotifyOnDownload ? window.isNotifyOnDownload() : true;
+					var badgeDlNotif = document.getElementById('wa-badge-dlnotif');
+					var btnDlNotif = document.getElementById('wa-action-toggle-dlnotif');
+					if (badgeDlNotif && btnDlNotif) {
+						badgeDlNotif.textContent = dlNotifActive ? 'Enabled' : 'Disabled';
+						badgeDlNotif.style.background = dlNotifActive ? (isThemeDark ? 'rgba(0,168,132,0.15)' : 'rgba(0,128,105,0.15)') : 'transparent';
+						badgeDlNotif.style.color = dlNotifActive ? accent : '#8696a0';
+						btnDlNotif.textContent = dlNotifActive ? 'Disable' : 'Enable';
+					}
+
 					var autoActive = window.isAutoStartActive ? window.isAutoStartActive() : false;
 					var badgeAuto = document.getElementById('wa-badge-auto');
 					var btnAuto = document.getElementById('wa-action-toggle-auto');
@@ -3313,6 +3451,21 @@ func getInitScript(ua string) string {
 				document.getElementById('wa-action-toggle-mute').onclick = function() {
 					if (window.toggleMuteAudio) window.toggleMuteAudio();
 					updateBadges();
+				};
+				document.getElementById('wa-action-toggle-notif').onclick = function() {
+					if (window.setNotificationsEnabled && window.isNotificationsEnabled) {
+						window.setNotificationsEnabled(!window.isNotificationsEnabled()).then(function() {
+							showFloatingToast(window.isNotificationsEnabled() ? '🔔 Desktop notifications: on' : '🔕 Desktop notifications: off');
+							updateBadges();
+						});
+					}
+				};
+				document.getElementById('wa-action-toggle-dlnotif').onclick = function() {
+					if (window.setNotifyOnDownload && window.isNotifyOnDownload) {
+						window.setNotifyOnDownload(!window.isNotifyOnDownload()).then(function() {
+							updateBadges();
+						});
+					}
 				};
 				document.getElementById('wa-action-toggle-auto').onclick = function() {
 					if (window.toggleAutoStart) {
