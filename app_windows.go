@@ -977,6 +977,33 @@ func setupProfileBindings(w webview2.WebView, ctx *profileViewContext) {
 			relaunchWithProfile(p.Name)
 		}
 	})
+	// Direct Chat (click-to-chat without saving the contact): validate the
+	// number, park on the chosen profile's tab, and navigate that tab to the
+	// official /send?phone= deep link. Returns "" on success, else a
+	// human-readable error for the toast. The no-shell fallback relaunches
+	// onto the profile like switchProfileNative does.
+	_ = w.Bind("startDirectChatNative", func(profileKey, phone string) string {
+		digits, err := normalizeChatPhone(phone)
+		if err != nil {
+			return err.Error()
+		}
+		p := findProfileByIDOrName(loadProfileRegistry(), profileKey)
+		if p == nil {
+			return "unknown profile — pick one from the list"
+		}
+		touchProfileLastUsed(p.ID)
+		if tabShellActive() {
+			if !tabManagerActivateByName(p.Name) {
+				return "could not open profile " + p.Name
+			}
+			if m := theShell; m != nil {
+				m.evalActive("window.location.href = " + tabEscapeJS(directChatURL(digits)) + ";")
+			}
+			return ""
+		}
+		relaunchWithProfile(p.Name)
+		return ""
+	})
 	_ = w.Bind("createProfileNative", func(name string) {
 		p, err := createProfile(name)
 		if err != nil {

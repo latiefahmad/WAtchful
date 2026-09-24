@@ -363,6 +363,20 @@ func TestLoadSettingsFallsBackOnHostileDownloadDir(t *testing.T) {
 	}
 }
 
+// Every platform shell must expose the Direct Chat bridge the toolbar
+// modal calls; a missing binding leaves Start Chat hanging forever.
+func TestDirectChatBindingPresentOnAllPlatforms(t *testing.T) {
+	for _, file := range []string{"app_windows.go", "app_darwin.go", "app_linux.go"} {
+		src, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(src), `"startDirectChatNative"`) {
+			t.Errorf("%s is missing binding %q", file, "startDirectChatNative")
+		}
+	}
+}
+
 // Every platform shell must expose the notification bridges the Settings
 // cards call; a missing binding leaves the toggle promise hanging forever.
 func TestNotificationBindingsPresentOnAllPlatforms(t *testing.T) {

@@ -9,6 +9,20 @@ for the tagged version to GitHub **verbatim** as the release notes. Conventions:
 - Everything under the heading until the next `## [` heading is published as-is.
 - Write for end users: what is new, what is fixed, and which file to download.
 
+## [v2.0.9] - 2026-09-24
+
+### 💬 Direct Chat
+
+- **Chat a new number without saving it** — new modal with target number (country code included) and a Send-From profile dropdown, opening the conversation via WhatsApp's official click-to-chat deep link.
+- **Three labeled entries** — a "Direct Chat" card in Settings, a tray menu item, and `Ctrl/Cmd+Shift+C` (listed in Help). An icon-only header button was tried and removed: too easy to miss.
+- **Validated twice** — client-side plus native (8–15 digits, E.164); anything else is refused with a toast and never navigates.
+
+### 🔄 Updating
+
+Updates arrive automatically in-app: WAtchful checks for new releases shortly after startup and every 4 hours, then downloads, installs, and restarts itself — you only approve. Accept the banner when it appears, or download the file for your platform from this release manually.
+
+**Full Changelog**: https://github.com/latiefahmad/WAtchful/compare/v2.0.8...v2.0.9
+
 ## [v2.0.8] - 2026-09-22
 
 ### 🔒 Security

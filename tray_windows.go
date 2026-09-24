@@ -154,6 +154,7 @@ func buildTrayMenu() uintptr {
 
 	appendTrayMenuRow(menu, "Show Window", trayMenuBase+900, 0)
 	appendTrayMenuRow(menu, "Settings", trayMenuBase+901, 0)
+	appendTrayMenuRow(menu, "Direct Chat...", trayMenuBase+902, 0)
 	return menu
 }
 
@@ -180,8 +181,9 @@ func splitProfileMenuRows(joined string) []string {
 // relaunch the app (which exits this process); the other actions run inline.
 func handleTrayMenuCommand(id uintptr) {
 	const (
-		cmdShow     = trayMenuBase + 900
-		cmdSettings = trayMenuBase + 901
+		cmdShow       = trayMenuBase + 900
+		cmdSettings   = trayMenuBase + 901
+		cmdDirectChat = trayMenuBase + 902
 	)
 	if id >= trayMenuBase && id < trayMenuBase+900 {
 		idx := int(id - trayMenuBase)
@@ -195,6 +197,8 @@ func handleTrayMenuCommand(id uintptr) {
 		showWindowFromTray()
 	case cmdSettings:
 		openSettingsFromTray()
+	case cmdDirectChat:
+		openDirectChatFromTray()
 	}
 }
 
@@ -203,6 +207,12 @@ func handleTrayMenuCommand(id uintptr) {
 func openSettingsFromTray() {
 	showWindowFromTray()
 	evalOnMainWebView(`if (window.showSettingsModal) { window.showSettingsModal(); }`)
+}
+
+// openDirectChatFromTray opens the Direct Chat modal the same way.
+func openDirectChatFromTray() {
+	showWindowFromTray()
+	evalOnMainWebView(`if (window.openDirectChatModal) { window.openDirectChatModal(); }`)
 }
 
 var trayEvalDispatch func(string)

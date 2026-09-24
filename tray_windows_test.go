@@ -3,6 +3,8 @@
 package main
 
 import (
+	"os"
+	"strings"
 	"testing"
 	"unsafe"
 )
@@ -36,5 +38,24 @@ func TestSplitProfileMenuRowsStableOrder(t *testing.T) {
 	// Tray clicks map by row index, so the order must be the joined order.
 	if rows[0] != "A" || rows[2] != "C" {
 		t.Fatalf("row order changed: %#v", rows)
+	}
+}
+
+// Direct Chat sits in the tray menu beside Settings so it stays reachable
+// without hunting for a header icon.
+func TestTrayMenuOffersDirectChat(t *testing.T) {
+	src, err := os.ReadFile("tray_windows.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"Direct Chat..."`,
+		"cmdDirectChat",
+		"openDirectChatFromTray",
+		"window.openDirectChatModal",
+	} {
+		if !strings.Contains(string(src), want) {
+			t.Errorf("tray direct-chat entry is missing %q", want)
+		}
 	}
 }

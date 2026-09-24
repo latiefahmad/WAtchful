@@ -331,6 +331,40 @@ func touchProfileLastUsed(id string) {
 	_ = saveProfileRegistryLocked(reg)
 }
 
+// normalizeChatPhone strips click-to-chat formatting and validates an
+// international number: an optional single leading '+', then 8-15 digits
+// (E.164, country code included). Spaces, dashes, dots and parentheses are
+// ignored; anything else is rejected. Returns the bare digits for the
+// /send?phone= deep link, so a crafted string can never smuggle a URL,
+// query string or script into the navigation target.
+func normalizeChatPhone(raw string) (string, error) {
+	s := strings.TrimSpace(raw)
+	s = strings.TrimPrefix(s, "+")
+	var digits strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+			digits.WriteRune(r)
+		case r == ' ' || r == '-' || r == '(' || r == ')' || r == '.':
+			// formatting noise, drop it
+		default:
+			return "", fmt.Errorf("phone number must hold 8-15 digits with country code (optional leading +)")
+		}
+	}
+	d := digits.String()
+	if len(d) < 8 || len(d) > 15 {
+		return "", fmt.Errorf("phone number must hold 8-15 digits with country code (optional leading +)")
+	}
+	return d, nil
+}
+
+// directChatURL builds the official click-to-chat deep link for an
+// already-validated digit string. Callers must pass normalizeChatPhone
+// output, never raw user input.
+func directChatURL(digits string) string {
+	return "https://web.whatsapp.com/send?phone=" + digits
+}
+
 var profileNameSanitizer = regexp.MustCompile(`[\x00-\x1f<>:"/\\|?*]`)
 
 func sanitizeProfileID(raw string) string {

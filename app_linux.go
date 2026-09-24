@@ -869,6 +869,26 @@ func runApp() {
 			relaunchWithProfile(p.Name)
 		}
 	})
+	// Direct Chat on the single-view shell: same validation, then either
+	// navigate in place (already on that profile) or relaunch onto it like
+	// switchProfileNative does.
+	_ = w.Bind("startDirectChatNative", func(profileKey, phone string) string {
+		digits, err := normalizeChatPhone(phone)
+		if err != nil {
+			return err.Error()
+		}
+		p := findProfileByIDOrName(loadProfileRegistry(), profileKey)
+		if p == nil {
+			return "unknown profile — pick one from the list"
+		}
+		if p.ID != getActiveProfile().ID {
+			touchProfileLastUsed(p.ID)
+			relaunchWithProfile(p.Name)
+			return ""
+		}
+		w.Navigate(directChatURL(digits))
+		return ""
+	})
 	_ = w.Bind("createProfileNative", func(name string) {
 		p, err := createProfile(name)
 		if err != nil {

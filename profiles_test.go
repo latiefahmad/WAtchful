@@ -516,3 +516,42 @@ func TestWipeProfileDataDir(t *testing.T) {
 		t.Fatal("unsafe id must be refused")
 	}
 }
+
+// Click-to-chat numbers: optional single leading '+', 8-15 digits (E.164
+// with country code); formatting noise ignored, anything else refused so a
+// crafted string can never smuggle a URL into the navigation target.
+func TestNormalizeChatPhone(t *testing.T) {
+	valid := map[string]string{
+		"6281234567890":      "6281234567890",
+		"+6281234567890":     "6281234567890",
+		"+62 812-3456-7890":  "6281234567890",
+		"(62) 812.3456.7890": "6281234567890",
+		"  62812345  ":       "62812345",
+		"12345678":           "12345678",
+		"123456789012345":    "123456789012345",
+	}
+	for in, want := range valid {
+		got, err := normalizeChatPhone(in)
+		if err != nil {
+			t.Errorf("normalizeChatPhone(%q) errored: %v", in, err)
+		} else if got != want {
+			t.Errorf("normalizeChatPhone(%q) = %q, want %q", in, got, want)
+		}
+	}
+	for _, in := range []string{
+		"", "   ", "abc", "62abc812", "1234567", "1234567890123456",
+		"++6281234567890", "62+81234567890", "62812*345678", "62812#345678",
+		"https://web.whatsapp.com/send?phone=6281234567890",
+		"6281234567890?text=hi", "62812\n345678",
+	} {
+		if got, err := normalizeChatPhone(in); err == nil {
+			t.Errorf("normalizeChatPhone(%q) = %q, want error", in, got)
+		}
+	}
+}
+
+func TestDirectChatURLUsesOfficialDeepLink(t *testing.T) {
+	if got := directChatURL("6281234567890"); got != "https://web.whatsapp.com/send?phone=6281234567890" {
+		t.Fatalf("directChatURL = %q", got)
+	}
+}

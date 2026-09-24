@@ -178,6 +178,7 @@ func TestSettingsControlsRemainWired(t *testing.T) {
 		"wa-action-toggle-notif", "wa-action-toggle-dlnotif",
 		"wa-btn-change-folder", "wa-btn-open-folder", "wa-btn-reset-folder",
 		"wa-btn-check-updates-modal", "wa-btn-reload-modal", "wa-btn-hardref-modal", "wa-btn-onboard-modal",
+		"wa-action-open-directchat",
 		"wa-btn-run-diagnostics", "wa-btn-show-shortcuts",
 		"wa-zoom-out", "wa-zoom-in", "wa-zoom-reset",
 	}
@@ -883,6 +884,31 @@ func TestDragDropRecoveryAndProbing(t *testing.T) {
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("drag-drop recovery is missing %q", want)
+		}
+	}
+}
+
+// Direct Chat: toolbar button beside the gear, modal with number input +
+// Send-From profile dropdown, client-side validation, and handoff to the
+// native bridge that navigates the profile's tab to /send?phone=.
+func TestDirectChatModalWiring(t *testing.T) {
+	script := getInitScript("test-agent")
+	for _, want := range []string{
+		"wa-action-open-directchat",
+		"window.openDirectChatModal = function()",
+		"wa-directchat-overlay",
+		"wa-directchat-number",
+		"wa-directchat-profile",
+		"wa-directchat-cancel",
+		"wa-directchat-start",
+		"window.startDirectChatNative(profileKey, raw)",
+		"/^[0-9]{8,15}$/",
+		"Opening chat with +",
+		"e.key === 'c'",
+		"Direct chat (new number)",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("direct-chat wiring is missing %q", want)
 		}
 	}
 }

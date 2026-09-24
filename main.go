@@ -2060,6 +2060,15 @@ func getInitScript(ua string) string {
 					window.triggerCheckForUpdate();
 				}
 			});
+
+			// Direct Chat shortcut (Ctrl/Cmd+Shift+C): browser accelerators
+			// stay disabled, so this never collides with Inspect Element.
+			window.addEventListener('keydown', function(e) {
+				if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'c' || e.key === 'C')) {
+					e.preventDefault();
+					if (window.openDirectChatModal) window.openDirectChatModal();
+				}
+			});
 		})();
 
 		// Dynamic Responsive Desktop Layout (enables seamless shrinking and expanding)
@@ -3021,6 +3030,108 @@ func getInitScript(ua string) string {
 			watchToolbarRoot();
 			document.addEventListener('DOMContentLoaded', watchToolbarRoot, { once: true });
 
+			// --- Direct Chat (click-to-chat without saving the contact) ---
+			// Number input + Send-From profile dropdown (hidden on single
+			// profile installs). Start validates client-side, then the native
+			// bridge validates again, parks on the profile's tab and navigates
+			// it to the official /send?phone= deep link.
+			window.openDirectChatModal = function() {
+				if (document.getElementById('wa-directchat-overlay')) return;
+
+				var overlay = document.createElement('div');
+				overlay.id = 'wa-directchat-overlay';
+				overlay.style.cssText = 'position:fixed;inset:0;background:rgba(8,15,19,.68);z-index:9999999;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;';
+
+				var modal = document.createElement('div');
+				modal.style.cssText = 'width:420px;max-width:94vw;border-radius:12px;box-sizing:border-box;padding:26px 26px 22px;box-shadow:0 18px 48px rgba(0,0,0,.4);background:#ffffff;border:1px solid #d1d7db;';
+				modal.innerHTML = '' +
+					'<h2 style="margin:0 0 6px;font-size:22px;font-weight:700;color:#00a884;">Direct Chat</h2>' +
+					'<p style="margin:0 0 18px;font-size:13px;color:#667781;line-height:1.45;">Chat with a new number without saving it to your contacts.</p>' +
+					'<label style="display:block;font-size:13px;font-weight:600;color:#111b21;margin-bottom:6px;">Target Number (with country code):</label>' +
+					'<input id="wa-directchat-number" type="tel" inputmode="tel" placeholder="e.g. 6281234567890" autocomplete="off" spellcheck="false" ' +
+					'style="width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #d1d7db;border-radius:8px;font-size:14px;color:#111b21;background:#f0f2f5;outline:none;margin-bottom:16px;" />' +
+					'<div id="wa-directchat-profile-row">' +
+					'  <label style="display:block;font-size:13px;font-weight:600;color:#111b21;margin-bottom:6px;">Send From Profile:</label>' +
+					'  <select id="wa-directchat-profile" style="width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #d1d7db;border-radius:8px;font-size:14px;color:#111b21;background:#f0f2f5;outline:none;margin-bottom:16px;"></select>' +
+					'</div>' +
+					'<div style="display:flex;gap:12px;">' +
+					'  <button id="wa-directchat-cancel" style="flex:1;padding:11px;border:none;border-radius:8px;font-size:14px;font-weight:600;color:#111b21;background:#e9edef;cursor:pointer;">Cancel</button>' +
+					'  <button id="wa-directchat-start" style="flex:1;padding:11px;border:none;border-radius:8px;font-size:14px;font-weight:700;color:#ffffff;background:#00a884;cursor:pointer;">Start Chat</button>' +
+					'</div>';
+				overlay.appendChild(modal);
+				(document.body || document.documentElement).appendChild(overlay);
+
+				var input = document.getElementById('wa-directchat-number');
+				var profileRow = document.getElementById('wa-directchat-profile-row');
+				var profileSel = document.getElementById('wa-directchat-profile');
+
+				function closeDirectChatModal() {
+					if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+					window.removeEventListener('keydown', onDirectChatKey, true);
+				}
+				function onDirectChatKey(e) {
+					if (e.key === 'Escape') closeDirectChatModal();
+					else if (e.key === 'Enter' && document.getElementById('wa-directchat-overlay')) startDirectChat();
+				}
+				function startDirectChat() {
+					var raw = (input && input.value) || '';
+					var digits = raw.trim().replace(/^\+/, '').replace(/[\s\-().]/g, '');
+					if (!/^[0-9]{8,15}$/.test(digits)) {
+						showFloatingToast('⚠️ Enter a valid number with country code (8-15 digits)');
+						if (input) input.focus();
+						return;
+					}
+					var profileKey = (profileSel && profileSel.value) || '';
+					if (!window.startDirectChatNative) {
+						showFloatingToast('⚠️ Direct Chat is not available in this build');
+						return;
+					}
+					window.startDirectChatNative(profileKey, raw).then(function(errText) {
+						if (errText) {
+							showFloatingToast('⚠️ ' + errText);
+							return;
+						}
+						closeDirectChatModal();
+						showFloatingToast('💬 Opening chat with +' + digits + '...');
+					}).catch(function() {
+						showFloatingToast('⚠️ Could not start the chat');
+					});
+				}
+
+				// Profiles for the Send-From dropdown; single-profile setups
+				// skip the row entirely.
+				function fillProfiles() {
+					if (!window.listProfilesNative) {
+						if (profileRow) profileRow.style.display = 'none';
+						return Promise.resolve();
+					}
+					return Promise.resolve(window.listProfilesNative()).then(function(profiles) {
+						profiles = profiles || [];
+						if (profiles.length <= 1) {
+							if (profileRow) profileRow.style.display = 'none';
+						}
+						for (var i = 0; i < profiles.length; i++) {
+							var opt = document.createElement('option');
+							opt.value = profiles[i].id || profiles[i].name || '';
+							opt.textContent = profiles[i].name || opt.value;
+							if (profiles[i].active) opt.selected = true;
+							profileSel.appendChild(opt);
+						}
+					}).catch(function() {
+						if (profileRow) profileRow.style.display = 'none';
+					});
+				}
+
+				document.getElementById('wa-directchat-cancel').onclick = closeDirectChatModal;
+				document.getElementById('wa-directchat-start').onclick = startDirectChat;
+				overlay.onclick = function(e) {
+					if (e.target === overlay) closeDirectChatModal();
+				};
+				window.addEventListener('keydown', onDirectChatKey, true);
+				fillProfiles();
+				if (input) input.focus();
+			};
+
 			// --- Minimalist WhatsApp Control Center Modal ---
 			window.showSettingsModal = function() {
 				if (document.getElementById('wa-settings-overlay')) {
@@ -3213,6 +3324,25 @@ func getInitScript(ua string) string {
 					'  <button id="wa-action-toggle-auto" class="wa-card-btn" style="padding:4px 10px;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;border-width:1px;border-style:solid;">Toggle</button>' +
 					'</div>';
 				quickGrid.appendChild(cardAuto);
+
+				// Card 5: Direct Chat (labeled entry: icon-only buttons are
+				// hard to discover, so the modal also opens from here, the
+				// tray menu and Ctrl/Cmd+Shift+C).
+				var cardDirect = document.createElement('div');
+				cardDirect.className = 'wa-modal-card';
+				cardDirect.style.cssText = 'border-radius:0;border-width:0 0 1px;border-style:solid;padding:12px 0;display:flex;align-items:center;justify-content:space-between;gap:16px;';
+				cardDirect.innerHTML = '' +
+					'<div>' +
+					'  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px;">' +
+					'    <strong class="wa-text-primary" style="font-size:12.5px;">💬 Direct Chat</strong>' +
+					'  </div>' +
+					'  <div class="wa-text-muted" style="font-size:11px;">Chat a new number without saving it to contacts.</div>' +
+					'</div>' +
+					'<div style="display:flex;align-items:center;justify-content:space-between;">' +
+					'  <span class="wa-text-muted" style="font-size:10px;font-family:monospace;">' + (isMac ? 'Cmd' : 'Ctrl') + '+Shift+C</span>' +
+					'  <button id="wa-action-open-directchat" class="wa-card-btn" style="padding:4px 10px;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;border-width:1px;border-style:solid;">Open</button>' +
+					'</div>';
+				quickGrid.appendChild(cardDirect);
 
 				modal.appendChild(quickGrid);
 
@@ -3543,6 +3673,9 @@ func getInitScript(ua string) string {
 						window.toggleAutoStart().then(function() { updateBadges(); });
 					}
 				};
+				document.getElementById('wa-action-open-directchat').onclick = function() {
+					if (window.openDirectChatModal) window.openDirectChatModal();
+				};
 
 				document.getElementById('wa-btn-check-updates-modal').onclick = function() {
 					closeSettings();
@@ -3572,6 +3705,7 @@ func getInitScript(ua string) string {
 					shortcutsList.innerHTML =
 						'<div><strong class="wa-text-primary">' + modifier + ',</strong> &mdash; Settings &amp; Controls</div>' +
 						tabRows +
+						'<div><strong class="wa-text-primary">' + modifier + '+Shift+C</strong> &mdash; Direct chat (new number)</div>' +
 						'<div><strong class="wa-text-primary">' + modifier + '+Shift+D</strong> &mdash; Open downloads folder</div>' +
 					'<div><strong class="wa-text-primary">' + modifier + '+Shift+H</strong> &mdash; Help &amp; onboarding</div>' +
 						'<div><strong class="wa-text-primary">' + modifier + '+Shift+U</strong> &mdash; Check for updates</div>' +
