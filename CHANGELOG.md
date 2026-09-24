@@ -9,6 +9,23 @@ for the tagged version to GitHub **verbatim** as the release notes. Conventions:
 - Everything under the heading until the next `## [` heading is published as-is.
 - Write for end users: what is new, what is fixed, and which file to download.
 
+## [v2.0.10] - 2026-09-24
+
+### 💬 Direct Chat
+
+- **One-click entry on the tab strip** — a `+ person` button sits beside the version tag (system icon font, DPI-scaled) with a native "Direct Chat" tooltip; hover highlight included. Settings card, tray menu and `Ctrl/Cmd+Shift+C` keep working.
+- **Profile avatars on the strip** now use the same person icon inside the accent dot, matching the button's visual language.
+
+### ✏️ Profiles
+
+- **The active profile can be renamed** — rename only edits the registry, so the in-use row now also offers the pencil button; the window title, tab strip and in-process profile follow the new name immediately. Switch/Reset/Delete stay hidden for the running profile (the backend refuses those for safety).
+
+### 🔄 Updating
+
+Updates arrive automatically in-app: WAtchful checks for new releases shortly after startup and every 4 hours, then downloads, installs, and restarts itself — you only approve. Accept the banner when it appears, or download the file for your platform from this release manually.
+
+**Full Changelog**: https://github.com/latiefahmad/WAtchful/compare/v2.0.9...v2.0.10
+
 ## [v2.0.9] - 2026-09-24
 
 ### 💬 Direct Chat

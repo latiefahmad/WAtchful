@@ -184,6 +184,11 @@ func TestRenameProfile(t *testing.T) {
 	if _, err := renameProfile(p.ID, "  "); err == nil {
 		t.Fatal("renaming to an empty name must fail")
 	}
+	// Renaming the ACTIVE profile is registry-only and must succeed: the
+	// backend has no in-use guard, and the tab shell syncs the name after.
+	if _, err := renameProfile(getActiveProfile().ID, "Active Renamed"); err != nil {
+		t.Fatalf("renaming the active profile must be allowed: %v", err)
+	}
 }
 
 func TestTouchProfileLastUsed(t *testing.T) {

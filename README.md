@@ -24,7 +24,7 @@ The screenshots use blurred chat content to protect personal information.
 
 **[Download the latest release →](https://github.com/latiefahmad/WAtchful/releases/latest)** — the page detects your OS and highlights the right file.
 
-Latest published release: **v2.0.9** ([release notes](https://github.com/latiefahmad/WAtchful/releases/tag/v2.0.9))
+Latest published release: **v2.0.10** ([release notes](https://github.com/latiefahmad/WAtchful/releases/tag/v2.0.10))
 
 | Platform | Download |
 | --- | --- |
@@ -107,6 +107,11 @@ Default data locations (settings, profile registry, logs):
 - Linux: `~/.config/WAtchful/`
 
 Inside, the Default profile keeps its session in `UserData/`, and every other profile gets an isolated folder under `Profiles/<profile>/`. Installs upgraded from older versions keep using their existing `WhatsAppDesk/` folder, so no session is lost.
+
+## Version 2.0.10
+
+- Direct Chat gets a strip button beside the version tag, with tooltip; profile avatars use the matching person icon.
+- The active profile can be renamed in place (title, tab strip and profile list follow immediately).
 
 ## Version 2.0.9
 

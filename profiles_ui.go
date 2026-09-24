@@ -63,8 +63,16 @@ func getProfilesUIScript() string {
 			};
 
 			function actionButtons(p) {
+				// Rename is safe for the active profile too (it only edits the
+				// registry name; the backend has no active-profile guard and
+				// the tab strip refreshes afterwards). Switch is pointless for
+				// the running profile, and Reset/Delete are refused by the
+				// backend because this process still writes to that folder.
 				if (p.active) {
-					return '<span class="wa-text-muted" style="font-size:10px;font-weight:600;padding:0 8px;">IN USE</span>';
+					return '<div style="display:flex;align-items:center;gap:6px;">' +
+						'<span class="wa-text-muted" style="font-size:10px;font-weight:600;padding:0 8px;">IN USE</span>' +
+						'<button class="wa-card-btn" data-profile-rename="' + esc(p.id) + '" title="Rename" aria-label="Rename ' + esc(p.name) + '" style="padding:4px 8px;border-radius:6px;font-size:11px;cursor:pointer;border-width:1px;border-style:solid;">✏️</button>' +
+						'</div>';
 				}
 				return '<div style="display:flex;gap:6px;">' +
 					'<button class="wa-card-btn" data-profile-switch="' + esc(p.id) + '" style="padding:4px 10px;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;border-width:1px;border-style:solid;">Switch</button>' +

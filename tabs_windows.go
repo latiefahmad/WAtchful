@@ -190,9 +190,35 @@ const (
 	tabDTEllipsis = 0x00008000
 	tabDTSingle   = 0x0020
 	tabDTVCenter  = 0x0004
+
+	// Win32 tooltip (TOOLTIPS_CLASS) for the Direct Chat strip button.
+	tabWSPopup      = 0x80000000
+	tabWSExTopmost  = 0x00000008
+	tabTTSAlwaystip = 0x00000001
+	tabTTSNoprefix  = 0x00000002
+	tabTTFSubclass  = 0x00000010
+	tabTTMAddTool   = 0x0400 + 50
+	tabTTMNewToolRc = 0x0400 + 52
 )
 
 type tabRect struct{ Left, Top, Right, Bottom int32 }
+
+// tabToolInfo mirrors TOOLINFOW for the strip tooltip (amd64: 64 bytes).
+// Field order matches the C layout; Go padding keeps the offsets exact.
+type tabToolInfo struct {
+	Size  uint32
+	Flags uint32
+	Hwnd  uintptr
+	ID    uintptr
+	Rect  tabRect
+	Inst  uintptr
+	Text  uintptr
+	Param uintptr
+}
+
+// tabTipText backs the tooltip string for the process lifetime: the
+// tooltip keeps the pointer, so it must never move or free.
+var tabTipTextPtr, _ = windows.UTF16PtrFromString("Direct Chat")
 
 type tabWndClass struct {
 	Size, Style         uint32
@@ -556,6 +582,16 @@ type tabShell struct {
 
 	isDark   bool
 	hoverTab int
+	// hoverDC tracks the Direct Chat strip button. Guarded by mu like
+	// hoverTab; read by the painter, written by the mouse handlers.
+	hoverDC bool
+	// tip is the Win32 tooltip window explaining the Direct Chat button.
+	// Created once with the strip; 0 until then (or if creation failed,
+	// in which case the button simply has no tooltip).
+	tip uintptr
+	// tipToolAdded tracks whether the tool was already registered with
+	// TTM_ADDTOOL (later moves use TTM_NEWTOOLRECT).
+	tipToolAdded bool
 	// dpi is the window's current DPI (96 = 100%). The strip is owner-drawn,
 	// so every pixel of it must be scaled by hand; the page itself is scaled
 	// by WebView2. Written and read on the pump thread only.
@@ -563,6 +599,12 @@ type tabShell struct {
 
 	fontText uintptr
 	fontBold uintptr
+	// fontIcon draws GDI icon glyphs: the Direct Chat contact glyph. The
+	// family is Segoe MDL2 Assets (verified: the installed name on Win10/11
+	// — "Segoe MDL2 Symbols" does not exist, and a wrong name makes GDI
+	// silently fall back to a font without the private-use glyph, rendering
+	// nothing). Recreated with the rest on DPI change.
+	fontIcon uintptr
 
 	executablePath string
 	iconFullPath   string
@@ -1203,6 +1245,12 @@ func tabManagerRenameProfile(id string) {
 				if t.ctx != nil {
 					t.ctx.profile = *p
 				}
+				// Renaming the ACTIVE tab also retitles the outer window and
+				// re-syncs the in-process active profile, so the new name is
+				// what tray menus, window titles and relaunches see.
+				if t.profile.ID == getActiveProfile().ID {
+					setActiveProfile(*p)
+				}
 			}
 		}
 		m.refreshChromeLocked()
@@ -1447,6 +1495,9 @@ type tabMetrics struct {
 	// verW reserves the right-edge slot for the muted build-version tag
 	// ("v" + appVersion) so bug-report screenshots always show the running build.
 	verW int32
+	// dcW is the Direct Chat button width. It sits immediately left of the
+	// version tag so the chat entry is visible without opening Settings.
+	dcW int32
 }
 
 func (m *tabShell) metrics() tabMetrics {
@@ -1466,6 +1517,7 @@ func (m *tabShell) metrics() tabMetrics {
 		badgeH: m.sc(16),
 		badgeY: m.sc(8),
 		verW:   m.sc(64),
+		dcW:    m.sc(68),
 	}
 }
 
@@ -1479,9 +1531,14 @@ func (m *tabShell) rebuildFonts() {
 		tabDeleteObject.Call(m.fontBold)
 		m.fontBold = 0
 	}
+	if m.fontIcon != 0 {
+		tabDeleteObject.Call(m.fontIcon)
+		m.fontIcon = 0
+	}
 	h := -m.sc(13)
 	m.fontText = tabMakeFont(400, h)
 	m.fontBold = tabMakeFont(700, h)
+	m.fontIcon = tabMakeFontFace(400, -m.sc(14), "Segoe MDL2 Assets")
 }
 
 func ebCacheArgs(dir string) (roots, subs []string) {
@@ -1556,11 +1613,69 @@ func (m *tabShell) indexAt(x, clientW int32, n int) int {
 	return int(idx)
 }
 
-func tabInitial(name string) string {
-	for _, r := range strings.TrimSpace(name) {
-		return strings.ToUpper(string(r))
+// directChatRect returns the Direct Chat button slot: right-aligned,
+// immediately left of the version tag. Tabs keep priority — on a cramped
+// strip the button hides instead of overlapping. Same scaled metrics as
+// the painter, so hit-testing can never disagree with what is drawn.
+func (m *tabShell) directChatRect(clientW int32) (tabRect, bool) {
+	mt := m.metrics()
+	var r tabRect
+	if clientW < mt.pad+mt.dcW+mt.gap+mt.verW+mt.pad {
+		return r, false
 	}
-	return "?"
+	right := clientW - mt.pad - mt.verW - mt.gap
+	r.Left, r.Top, r.Right, r.Bottom = right-mt.dcW, mt.top, right, mt.stripH-mt.top
+	return r, true
+}
+
+// ensureTip creates the strip tooltip once. With TTF_SUBCLASS the tooltip
+// relays the strip's mouse messages itself, so no per-message plumbing is
+// needed afterwards — only the tool rect follows layout via moveTip.
+func (m *tabShell) ensureTip() {
+	if m.tip != 0 {
+		return
+	}
+	cn, _ := windows.UTF16PtrFromString("tooltips_class32")
+	hinst, _, _ := tabGetModuleHandle.Call(0)
+	tip, _, _ := tabCreateWindowEx.Call(
+		uintptr(tabWSExTopmost),
+		uintptr(unsafe.Pointer(cn)),
+		0, 0, 0, 0, 0, 0, m.strip, 0, hinst, 0)
+	if tip == 0 {
+		return
+	}
+	m.tip = tip
+	m.moveTip()
+}
+
+// moveTip points the tooltip at the current button slot (or an empty rect
+// when the button is hidden, so it never fires). Called from layoutOuter,
+// which already runs on every resize and DPI change.
+func (m *tabShell) moveTip() {
+	if m.tip == 0 {
+		return
+	}
+	var r tabRect
+	tabGetClientRect.Call(m.strip, uintptr(unsafe.Pointer(&r)))
+	dcr, _ := m.directChatRect(r.Right - r.Left)
+	var ti tabToolInfo
+	ti.Size = uint32(unsafe.Sizeof(ti))
+	ti.Flags = tabTTFSubclass
+	ti.Hwnd = m.strip
+	ti.ID = 1
+	ti.Rect = dcr
+	hinst, _, _ := tabGetModuleHandle.Call(0)
+	ti.Inst = hinst
+	ti.Text = uintptr(unsafe.Pointer(tabTipTextPtr))
+	// Timeout-guarded like the second-launch IPC: a wedged receiver must
+	// never hang the pump (see v2.0.6).
+	var tmRes uintptr
+	if m.tipToolAdded {
+		tabSendMessageTO.Call(m.tip, tabTTMNewToolRc, 0, uintptr(unsafe.Pointer(&ti)), 0, 1000, uintptr(unsafe.Pointer(&tmRes)))
+	} else {
+		tabSendMessageTO.Call(m.tip, tabTTMAddTool, 0, uintptr(unsafe.Pointer(&ti)), 0, 1000, uintptr(unsafe.Pointer(&tmRes)))
+		m.tipToolAdded = true
+	}
 }
 
 func (m *tabShell) paintStrip() {
@@ -1622,7 +1737,9 @@ func (m *tabShell) paintStrip() {
 			tabFillRect.Call(hdc, uintptr(unsafe.Pointer(&bar)), ab)
 			tabDeleteObject.Call(ab)
 		}
-		// avatar dot with initial
+		// avatar: person glyph from the system icon font, inside the accent
+		// dot. Same Contact glyph as the Direct Chat button, so the two read
+		// as one visual language. Initials were a text stand-in.
 		dotTop := y + mt.top
 		tabSetBkMode.Call(hdc, 1)
 		if hib {
@@ -1642,12 +1759,11 @@ func (m *tabShell) paintStrip() {
 			tabDeleteObject.Call(ab2)
 			tabSetTextColor.Call(hdc, avatarText)
 		}
-		tabSelectObject.Call(hdc, m.fontBold)
-		init := tabInitial(snap.names[i])
-		ip, _ := windows.UTF16PtrFromString(init)
+		tabSelectObject.Call(hdc, m.fontIcon)
+		ap, _ := windows.UTF16PtrFromString(string(rune(0xE77B)))
 		var ar tabRect
 		ar.Left, ar.Top, ar.Right, ar.Bottom = x+mt.barIn, dotTop, x+mt.barIn+mt.dot, dotTop+mt.dot
-		tabDrawText.Call(hdc, uintptr(unsafe.Pointer(ip)), uintptr(^uintptr(0)),
+		tabDrawText.Call(hdc, uintptr(unsafe.Pointer(ap)), uintptr(^uintptr(0)),
 			uintptr(unsafe.Pointer(&ar)), uintptr(tabDTCenter|tabDTSingle|tabDTVCenter|tabDTNoPrefix))
 		// name
 		tabSetTextColor.Call(hdc, text)
@@ -1702,6 +1818,46 @@ func (m *tabShell) paintStrip() {
 		tabDrawText.Call(hdc, uintptr(unsafe.Pointer(vp)), uintptr(^uintptr(0)),
 			uintptr(unsafe.Pointer(&vr)), uintptr(tabDTRight|tabDTSingle|tabDTVCenter|tabDTNoPrefix))
 	}
+	// Direct Chat button: "+" plus the Segoe MDL2 contact glyph, accent on
+	// transparent. A real icon font instead of hand-drawn shapes, so the
+	// glyph stays crisp at any DPI. A Win32 tooltip ("Direct Chat")
+	// explains it on hover.
+	if dcr, dcOK := m.directChatRect(area.Right - area.Left); dcOK {
+		m.mu.Lock()
+		dcHover := m.hoverDC
+		m.mu.Unlock()
+		dcFill := bg
+		if dcHover {
+			dcFill = tabHover
+		}
+		dcPen, _, _ := tabCreatePen.Call(0, 0, accent) // PS_SOLID, 1px, accent
+		dcb, _, _ := tabCreateBrush.Call(dcFill)
+		oldPen, _, _ := tabSelectObject.Call(hdc, dcPen)
+		oldBrush, _, _ := tabSelectObject.Call(hdc, dcb)
+		tabRoundRect.Call(hdc, uintptr(dcr.Left), uintptr(dcr.Top), uintptr(dcr.Right), uintptr(dcr.Bottom),
+			uintptr(mt.radius/2), uintptr(mt.radius/2))
+		tabSelectObject.Call(hdc, oldPen)
+		tabSelectObject.Call(hdc, oldBrush)
+		tabDeleteObject.Call(dcPen)
+		tabDeleteObject.Call(dcb)
+		// "+" label on the left slot.
+		plusW := m.sc(20)
+		tabSetBkMode.Call(hdc, 1)
+		tabSetTextColor.Call(hdc, accent)
+		tabSelectObject.Call(hdc, m.fontBold)
+		var pr tabRect
+		pr.Left, pr.Top, pr.Right, pr.Bottom = dcr.Left, dcr.Top, dcr.Left+plusW, dcr.Bottom
+		plusp, _ := windows.UTF16PtrFromString("+")
+		tabDrawText.Call(hdc, uintptr(unsafe.Pointer(plusp)), uintptr(^uintptr(0)),
+			uintptr(unsafe.Pointer(&pr)), uintptr(tabDTCenter|tabDTSingle|tabDTVCenter|tabDTNoPrefix))
+		// Contact glyph from the icon font on the remaining slot.
+		tabSelectObject.Call(hdc, m.fontIcon)
+		var ir tabRect
+		ir.Left, ir.Top, ir.Right, ir.Bottom = dcr.Left+plusW, dcr.Top, dcr.Right, dcr.Bottom
+		iconp, _ := windows.UTF16PtrFromString(string(rune(0xE77B))) // MDL2 Contact glyph
+		tabDrawText.Call(hdc, uintptr(unsafe.Pointer(iconp)), uintptr(^uintptr(0)),
+			uintptr(unsafe.Pointer(&ir)), uintptr(tabDTCenter|tabDTSingle|tabDTVCenter|tabDTNoPrefix))
+	}
 	if hibPen != 0 {
 		tabDeleteObject.Call(hibPen)
 	}
@@ -1722,8 +1878,14 @@ func stripWndProc(hwnd, m_, wp, lp uintptr) uintptr {
 		return 1
 	case tabWMLButton:
 		lx := int32(lp & 0xFFFF)
+		ly := int32((lp >> 16) & 0xFFFF)
 		var r tabRect
 		tabGetClientRect.Call(hwnd, uintptr(unsafe.Pointer(&r)))
+		if dcr, dcOK := m.directChatRect(r.Right - r.Left); dcOK &&
+			lx >= dcr.Left && lx < dcr.Right && ly >= dcr.Top && ly < dcr.Bottom {
+			m.evalActive("if (window.openDirectChatModal) { window.openDirectChatModal(); }")
+			return 0
+		}
 		m.mu.Lock()
 		n := len(m.tabs)
 		m.mu.Unlock()
@@ -1733,16 +1895,26 @@ func stripWndProc(hwnd, m_, wp, lp uintptr) uintptr {
 		return 0
 	case tabWMMouseMove:
 		lx := int32(lp & 0xFFFF)
+		ly := int32((lp >> 16) & 0xFFFF)
 		var r tabRect
 		tabGetClientRect.Call(hwnd, uintptr(unsafe.Pointer(&r)))
 		m.mu.Lock()
 		n := len(m.tabs)
 		m.mu.Unlock()
 		hover := m.indexAt(lx, r.Right-r.Left, n)
+		dcHover := false
+		if dcr, dcOK := m.directChatRect(r.Right - r.Left); dcOK &&
+			lx >= dcr.Left && lx < dcr.Right && ly >= dcr.Top && ly < dcr.Bottom {
+			dcHover = true
+		}
 		changed := false
 		m.mu.Lock()
 		if hover != m.hoverTab {
 			m.hoverTab = hover
+			changed = true
+		}
+		if dcHover != m.hoverDC {
+			m.hoverDC = dcHover
 			changed = true
 		}
 		m.mu.Unlock()
@@ -1757,8 +1929,9 @@ func stripWndProc(hwnd, m_, wp, lp uintptr) uintptr {
 		return 0
 	case tabWMMouseLeave:
 		m.mu.Lock()
-		if m.hoverTab != -1 {
+		if m.hoverTab != -1 || m.hoverDC {
 			m.hoverTab = -1
+			m.hoverDC = false
 			m.mu.Unlock()
 			tabInvalidateRect.Call(hwnd, 0, 0)
 		} else {
@@ -2044,6 +2217,7 @@ func (m *tabShell) layoutOuter() {
 	tabGetClientRect.Call(m.hwnd, uintptr(unsafe.Pointer(&r)))
 	tabSetWindowPos.Call(m.strip, 0, 0, 0, uintptr(r.Right-r.Left), uintptr(m.metrics().stripH),
 		uintptr(tabSWPNoZOrder|tabSWPNoActivate))
+	m.moveTip()
 }
 
 // ---------------------------------------------------------------------------
@@ -2051,7 +2225,11 @@ func (m *tabShell) layoutOuter() {
 // ---------------------------------------------------------------------------
 
 func tabMakeFont(weight int32, height int32) uintptr {
-	name, _ := windows.UTF16PtrFromString("Segoe UI")
+	return tabMakeFontFace(weight, height, "Segoe UI")
+}
+
+func tabMakeFontFace(weight int32, height int32, face string) uintptr {
+	name, _ := windows.UTF16PtrFromString(face)
 	h, _, _ := tabCreateFont.Call(
 		uintptr(height), 0, 0, 0, uintptr(weight),
 		0, 0, 0, 0, 0, 0, 0, 0,
@@ -2161,6 +2339,7 @@ func runTabbedShell() {
 	m.strip = strip
 
 	m.rebuildFonts()
+	m.ensureTip()
 
 	if state := loadWindowStateForMonitor(getSettingsBaseDir(), windowMonitorKey(hwnd)); state != nil {
 		procMoveWindow.Call(hwnd, uintptr(int32(state.X)), uintptr(int32(state.Y)), uintptr(int32(state.Width)), uintptr(int32(state.Height)), 1)

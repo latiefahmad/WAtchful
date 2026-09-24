@@ -443,3 +443,52 @@ func TestStripShowsAppVersion(t *testing.T) {
 		}
 	}
 }
+
+// The Direct Chat button lives right-aligned left of the version tag, from
+// the same scaled metrics as the painter. Tabs keep priority: a cramped
+// strip hides the button instead of overlapping it. Clicking it opens the
+// modal on the active tab.
+func TestDirectChatStripButtonRect(t *testing.T) {
+	m := &tabShell{dpi: 96}
+	r, ok := m.directChatRect(1084)
+	if !ok {
+		t.Fatal("button must fit on a wide strip")
+	}
+	// pad=8, dcW=68, gap=6, verW=64, stripH=40, top=4 at 100%.
+	if r.Left != 938 || r.Right != 1006 || r.Top != 4 || r.Bottom != 36 {
+		t.Fatalf("button rect = %+v, want {938 4 1006 36}", r)
+	}
+	if _, ok := m.directChatRect(100); ok {
+		t.Fatal("button must hide on a cramped strip instead of overlapping tabs")
+	}
+	m.dpi = 192
+	r2, ok := m.directChatRect(2168)
+	if !ok {
+		t.Fatal("button must fit on a wide strip at 200%")
+	}
+	if r2.Left != 1876 || r2.Right != 2012 || r2.Top != 8 || r2.Bottom != 72 {
+		t.Fatalf("200%% button rect = %+v, want {1876 8 2012 72}", r2)
+	}
+
+	shell, err := os.ReadFile("tabs_windows.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"func (m *tabShell) directChatRect",
+		"window.openDirectChatModal",
+		"m.hoverDC",
+		"tooltips_class32",
+		"Direct Chat",
+		"ensureTip",
+		"moveTip",
+		"Segoe MDL2 Assets",
+		"fontIcon",
+		"0xE77B",
+		"m.sc(14)",
+	} {
+		if !strings.Contains(string(shell), want) {
+			t.Errorf("strip direct-chat wiring is missing %q", want)
+		}
+	}
+}

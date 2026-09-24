@@ -1436,8 +1436,17 @@ func runApp() {
 		return deleteProfile(id) == nil
 	})
 	_ = w.Bind("renameProfileNative", func(id, name string) bool {
-		_, err := renameProfile(id, name)
-		return err == nil
+		p, err := renameProfile(id, name)
+		if err != nil {
+			return false
+		}
+		// Keep the in-process active profile in sync so the new name shows
+		// in titles/menus without a relaunch (rename is registry-only and
+		// safe for the running profile).
+		if p.ID == getActiveProfile().ID {
+			setActiveProfile(p)
+		}
+		return true
 	})
 	_ = w.Bind("resetProfileNative", func(id string) bool {
 		return resetProfileData(id) == nil
