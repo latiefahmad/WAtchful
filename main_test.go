@@ -912,3 +912,88 @@ func TestDirectChatModalWiring(t *testing.T) {
 		}
 	}
 }
+
+// A dismissed WhatsApp viewer re-creates the attachment blob, which used to
+// re-enter the preview interceptor and reopen the modal in an infinite
+// loop. The same document is auto-previewed only once per window (8s
+// cooldown); a fresh click on the document clears the guard and previews
+// again.
+func TestDocumentPreviewLoopGuard(t *testing.T) {
+	script := getInitScript("test-agent")
+	for _, want := range []string{
+		"var lastDocPreviewName = ''",
+		"var docPreviewCooldownMs = 8000",
+		"name === lastDocPreviewName && (Date.now() - lastDocPreviewAt) < docPreviewCooldownMs",
+		"lastDocPreviewName = name;",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("preview loop guard is missing %q", want)
+		}
+	}
+	// The guard must be reset by fresh intent: the document click handler
+	// AND the hidden->visible window transition both clear it.
+	if got := strings.Count(script, "lastDocPreviewName = '';"); got < 2 {
+		t.Errorf("guard reset must exist in click + visibility handlers, found %d", got)
+	}
+}
+
+// dismissStuckViewer must stay bounded and stop early: the old version
+// hammered WhatsApp's viewer for 2.4s (30 rounds of close clicks + synthetic
+// Escapes), which fought the page and fed the preview loop.
+func TestDismissStuckViewerIsBounded(t *testing.T) {
+	script := getInitScript("test-agent")
+	for _, want := range []string{
+		"var maxAttempts = 8;",
+		"if (attempts > 3) clearInterval(dismissTimer);",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("bounded dismissal is missing %q", want)
+		}
+	}
+	if strings.Contains(script, "if (attempts > 30)") {
+		t.Error("the old 30-round hammer is back")
+	}
+}
+
+// The Archived navigation control ("Archived"/"Diarsipkan"/...) is UI
+// guidance, not private chat data: it must stay readable in privacy mode
+// while archived rows themselves stay redacted. Tagged by text match with a
+// length guard (a real chat row holds far more text), exempted by CSS that
+// wins over the row rules.
+func TestPrivacyModeKeepsArchivedNavigationReadable(t *testing.T) {
+	script := getInitScript("test-agent")
+	for _, want := range []string{
+		"data-wa-archived-nav",
+		"function tagArchivedNavIn(root)",
+		"WA_ARCHIVED_RE",
+		"Diarsipkan",
+		"t.length > 24",
+		"tagArchivedNavIn(document.getElementById('pane-side'))",
+		"tagArchiveInfoIn(document.getElementById('pane-side'))",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("archived navigation handling is missing %q", want)
+		}
+	}
+}
+
+// The update banner is a fixed overlay: without yielding layout space it
+// covers WhatsApp's own top header (Archived row, back button). The banner
+// must push #app down by its live height (progress row grows it) and clean
+// up the observer + CSS hooks on dismiss.
+func TestUpdateBannerReservesLayoutSpace(t *testing.T) {
+	script := getInitScript("test-agent")
+	for _, want := range []string{
+		"html.wa-update-visible #app",
+		"--wa-update-banner-height",
+		"bannerResizeObserver = new ResizeObserver(syncBannerLayout)",
+		"bannerResizeObserver.observe(banner)",
+		"bannerResizeObserver.disconnect()",
+		"classList.remove('wa-update-visible')",
+		"removeProperty('--wa-update-banner-height')",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("update banner layout is missing %q", want)
+		}
+	}
+}

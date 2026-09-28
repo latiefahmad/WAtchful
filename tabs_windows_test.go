@@ -492,3 +492,30 @@ func TestDirectChatStripButtonRect(t *testing.T) {
 		}
 	}
 }
+
+// Controller calls on a half-built view fault the process (Win32 re-enters
+// our wndproc mid-Embed: title-bar move loop, focus hand-off — upstream
+// v1.6.1 issues #58-60). Every controller-touching chromiumView method must
+// refuse until buildView flips the embedded flag after a successful Embed.
+func TestChromiumViewRefusesEarlyControllerCalls(t *testing.T) {
+	v := &chromiumView{}
+	if v.isEmbedded() {
+		t.Fatal("fresh view must not report embedded")
+	}
+	// None of these may touch the (nil) controller: they must no-op or
+	// error instead of faulting.
+	if err := v.Show(); err == nil {
+		t.Error("Show on unembedded view must error, not fault")
+	}
+	if err := v.Hide(); err == nil {
+		t.Error("Hide on unembedded view must error, not fault")
+	}
+	v.Focus() // must return silently
+	if v.Suspend() {
+		t.Error("Suspend on unembedded view must report false")
+	}
+	if v.Resume() {
+		t.Error("Resume on unembedded view must report false")
+	}
+	v.Destroy() // must return silently
+}

@@ -9,6 +9,22 @@ for the tagged version to GitHub **verbatim** as the release notes. Conventions:
 - Everything under the heading until the next `## [` heading is published as-is.
 - Write for end users: what is new, what is fixed, and which file to download.
 
+## [v2.0.11] - 2026-09-28
+
+### 🛠 Fixed
+
+- **Document preview no longer reopens in a loop** — dismissing WhatsApp's own viewer made it re-create the attachment blob, which re-entered the interceptor and reopened the preview indefinitely. The same document is now auto-previewed once per window (8s cooldown); a fresh click is still honoured.
+- **Gentler viewer dismissal** — the stuck-viewer sweep drops from 30 rounds to 8 and stops early when no viewer is present, instead of hammering close buttons for 2.4s.
+- **Update banner yields layout space** — the fixed banner used to cover WhatsApp's own top header (Archived row, back button); `#app` is now pushed down by the banner's live height, with the resize observer disconnected on dismiss.
+- **Privacy keeps Archived navigation readable** — the Archived row label and drawer guidance stay visible (multi-locale) while archived chats themselves stay redacted.
+- **Early-lifecycle controller guard** — controller calls on a half-built view (Win32 re-entering our window procedure mid-embed: title-bar move loop, focus hand-off) now refuse instead of faulting the process.
+
+### 🔄 Updating
+
+Updates arrive automatically in-app: WAtchful checks for new releases shortly after startup and every 4 hours, then downloads, installs, and restarts itself — you only approve. Accept the banner when it appears, or download the file for your platform from this release manually.
+
+**Full Changelog**: https://github.com/latiefahmad/WAtchful/compare/v2.0.10...v2.0.11
+
 ## [v2.0.10] - 2026-09-24
 
 ### 💬 Direct Chat

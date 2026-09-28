@@ -258,14 +258,22 @@ type tabTrackMouseEvt struct {
 
 // ---------------------------------------------------------------------------
 // chromiumView: webview2.WebView over a raw edge.Chromium.
-// ---------------------------------------------------------------------------
-
+//
+// Lifecycle guard: every controller call below is only safe once Embed has
+// returned. Win32 re-enters our window procedure on the same thread in the
+// middle of COM calls (title-bar move loop, focus hand-off), and an early
+// Show/Hide/Suspend/Eval/Navigate on a half-built controller faults the
+// process (upstream v1.6.1, issues #58-60). The embedded flag is set only by
+// buildView after a successful Embed; all methods below refuse while it is
+// clear, and tests pin that contract.
 type chromiumView struct {
 	chromium *edge.Chromium
 	outer    uintptr
 	shell    *tabShell
 	mu       sync.Mutex
 	bindings map[string]interface{}
+	// embedded turns true once Embed succeeded. Read under mu.
+	embedded bool
 }
 
 var _ webview2.WebView = (*chromiumView)(nil)
@@ -394,12 +402,34 @@ func (v *chromiumView) routeMessage(payload string) {
 	})
 }
 
-func (v *chromiumView) Init(js string)         { v.chromium.Init(js) }
-func (v *chromiumView) Eval(js string)         { v.chromium.Eval(js) }
-func (v *chromiumView) Navigate(url string)    { v.chromium.Navigate(url) }
-func (v *chromiumView) SetHtml(html string)    { v.chromium.NavigateToString(html) }
-func (v *chromiumView) Suspend() bool          { return v.chromium.Suspend() }
-func (v *chromiumView) Resume() bool           { return v.chromium.Resume() }
+func (v *chromiumView) Init(js string)      { v.chromium.Init(js) }
+func (v *chromiumView) Eval(js string)      { v.chromium.Eval(js) }
+func (v *chromiumView) Navigate(url string) { v.chromium.Navigate(url) }
+func (v *chromiumView) SetHtml(html string) { v.chromium.NavigateToString(html) }
+
+// isEmbedded reports whether Embed has returned successfully. The vendor
+// layer nil-guards Suspend/Resume/SetBoundsRect/CloseController, but
+// Show/Hide/Eval/Navigate/Focus/Init dereference the controller directly:
+// an early call (Win32 re-entering our wndproc mid-Embed) faults the
+// process, so every caller below goes through this gate first.
+func (v *chromiumView) isEmbedded() bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.embedded
+}
+
+func (v *chromiumView) Suspend() bool {
+	if !v.isEmbedded() {
+		return false
+	}
+	return v.chromium.Suspend()
+}
+func (v *chromiumView) Resume() bool {
+	if !v.isEmbedded() {
+		return false
+	}
+	return v.chromium.Resume()
+}
 func (v *chromiumView) Window() unsafe.Pointer { return v.chromium.HostWindow() }
 
 // applyZoomToAllTabs sets the display zoom for every tab (it is one global
@@ -427,10 +457,27 @@ type zoomSetter interface {
 }
 
 // View-visibility helpers used by the tab manager. Bounds always go through
-// the manager (layoutViews) so views sit below the tab strip.
-func (v *chromiumView) Show() error { return v.chromium.Show() }
-func (v *chromiumView) Hide() error { return v.chromium.Hide() }
-func (v *chromiumView) Focus()      { v.chromium.Focus() }
+// the manager (layoutViews) so views sit below the tab strip. All three are
+// gated: the vendor dereferences the controller directly, so an early call
+// (Win32 re-entering our wndproc mid-Embed) would fault the process.
+func (v *chromiumView) Show() error {
+	if !v.isEmbedded() {
+		return errors.New("webview2 controller not embedded yet")
+	}
+	return v.chromium.Show()
+}
+func (v *chromiumView) Hide() error {
+	if !v.isEmbedded() {
+		return errors.New("webview2 controller not embedded yet")
+	}
+	return v.chromium.Hide()
+}
+func (v *chromiumView) Focus() {
+	if !v.isEmbedded() {
+		return
+	}
+	v.chromium.Focus()
+}
 
 // SetZoomFactor applies the WebView2 page zoom factor (1.0 = 100%).
 func (v *chromiumView) SetZoomFactor(zoom float64) error {
@@ -471,7 +518,12 @@ func (v *chromiumView) Run() {
 
 func (v *chromiumView) Terminate() { tabPostQuit.Call(0) }
 
-func (v *chromiumView) Destroy() { _ = v.chromium.Hide() }
+func (v *chromiumView) Destroy() {
+	if !v.isEmbedded() {
+		return
+	}
+	_ = v.chromium.Hide()
+}
 
 func (v *chromiumView) SetBrowserAcceleratorKeysEnabled(enabled bool) error {
 	s, err := v.chromium.GetSettings()
@@ -981,6 +1033,11 @@ func (m *tabShell) buildView(t *tabEntry) error {
 	if !c.Embed(m.hwnd) {
 		return errors.New("failed to embed webview2 for profile " + p.Name)
 	}
+	// From here the controller exists: controller calls are safe, including
+	// re-entrant ones from Win32 modal loops (move/size, focus hand-off).
+	v.mu.Lock()
+	v.embedded = true
+	v.mu.Unlock()
 	c.SetPermission(edge.CoreWebView2PermissionKindClipboardRead, edge.CoreWebView2PermissionStateAllow)
 	if s, err := c.GetSettings(); err == nil {
 		_ = s.PutAreDefaultContextMenusEnabled(false)

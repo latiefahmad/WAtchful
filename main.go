@@ -288,14 +288,23 @@ func getInitScript(ua string) string {
 		// Dismiss WhatsApp Web's internal stuck viewer overlay
 		function dismissStuckViewer() {
 			var attempts = 0;
+			// Bounded and gentle on purpose. This used to hammer WhatsApp's
+			// viewer for 2.4s (30 rounds of 80ms), clicking close buttons and
+			// dispatching synthetic Escape events - which fought the page and
+			// helped turn a re-opened document into a preview loop. Eight
+			// rounds is plenty for the overlay to mount, and nothing is sent
+			// when there is no viewer to dismiss.
+			var maxAttempts = 8;
 			var dismissTimer = setInterval(function() {
 				attempts++;
-				if (attempts > 30) {
+				if (attempts > maxAttempts) {
 					clearInterval(dismissTimer);
 					return;
 				}
 				var viewer = document.querySelector('[data-testid="media-viewer"], [data-animate-media-viewer="true"]');
 				if (!viewer) {
+					// No viewer: stop early instead of polling the void.
+					if (attempts > 3) clearInterval(dismissTimer);
 					return;
 				}
 				var closeSelectors = [
@@ -354,6 +363,15 @@ func getInitScript(ua string) string {
 		function isRecentExplicitDownload() {
 			return (Date.now() - lastExplicitDownloadAt) < 6000;
 		}
+		// Preview loop guard (upstream v1.6.1): dismissing WhatsApp's own
+		// viewer can make it re-create the attachment blob, which re-enters
+		// the createObjectURL interceptor and re-opens our preview window in
+		// an infinite loop. The same document is only auto-previewed once
+		// per window (cooldown below); a fresh user click resets the guard
+		// and is honoured again.
+		var lastDocPreviewName = '';
+		var lastDocPreviewAt = 0;
+		var docPreviewCooldownMs = 8000;
 		function extractDocumentName(el) {
 			if (!el || typeof el.closest !== 'function') return '';
 			// NEVER extract document names from inside the media viewer, modal dialogs, or top toolbars
@@ -396,6 +414,10 @@ func getInitScript(ua string) string {
 			if (name) {
 				lastClickedDocName = name;
 				lastDocumentIntentAt = Date.now();
+				// An explicit click is fresh intent: clear the loop guard so
+				// the same document can be previewed again on purpose.
+				lastDocPreviewName = '';
+				lastDocPreviewAt = 0;
 			}
 		}, true);
 
@@ -1185,6 +1207,15 @@ func getInitScript(ua string) string {
 						else if (bType.indexOf('word') >= 0) name += '.docx';
 						else name += '.pdf';
 					}
+					// Loop guard: WhatsApp re-creating the same attachment
+					// blob (its own viewer being dismissed) must not re-open
+					// the preview. Skip silently; a real user click clears
+					// the guard in the click handler above.
+					if (name === lastDocPreviewName && (Date.now() - lastDocPreviewAt) < docPreviewCooldownMs) {
+						return url;
+					}
+					lastDocPreviewName = name;
+					lastDocPreviewAt = Date.now();
 					var isPdf = name.toLowerCase().endsWith('.pdf');
 					var previewBlob = isPdf ? blob.slice(0, blob.size, 'application/pdf') : blob;
 					var ownedBlobUrl = isPdf ? origCreateObjectURL(previewBlob) : '';
@@ -1373,6 +1404,10 @@ func getInitScript(ua string) string {
 				if (!document.hidden) return;
 				lastClickedDocName = '';
 				lastDocumentIntentAt = 0;
+				// A hidden window resets the preview loop guard too, so the
+				// document can be re-previewed after coming back.
+				lastDocPreviewName = '';
+				lastDocPreviewAt = 0;
 				// Wait a bit longer than a quick alt-tab before trimming memory, so briefly
 				// switching windows doesn't repeatedly trigger native working-set trims.
 				releaseTimer = setTimeout(function() {
@@ -1583,6 +1618,14 @@ func getInitScript(ua string) string {
 			// cover rows whose spans lack that class. Timestamps/meta spans
 			// don't carry selectable-text, so they stay readable by design.
 			styleEl.textContent = [
+				// The Archived navigation control is UI guidance, not private
+				// chat data: it stays readable (and keeps its readable clock)
+				// while the archived rows themselves are still redacted.
+				// Tagged by the tagger below; the exempt selectors win over
+				// the row rules because they come later in the sheet.
+				'.privacy-mode [data-wa-archived-nav] span,',
+				'.privacy-mode [data-wa-archived-nav] a',
+				'{ color: inherit !important; text-shadow: none !important; background: transparent !important; }',
 				// Layer 1: names + previews in the chat list, hover row to peek.
 				// Spans tagged data-wa-time by the timestamp tagger below are
 				// always spared, so clock times stay readable.
@@ -1696,6 +1739,38 @@ func getInitScript(ua string) string {
 			// state cost is ~zero. Attribute writes don't trip the childList
 			// observers, so this can't feed an observer loop.
 			var WA_TIME_RE = /^(\d{1,2}:\d{2}(\s?(AM|PM))?|Today|Yesterday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Hari ini|Kemarin|Senin|Selasa|Rabu|Kamis|Jumat|Sabtu|Minggu)$/i;
+			// Archived navigation labels ("Archived", "Diarsipkan", ...) in any
+			// supported locale. Matched against whitespace-collapsed text.
+			var WA_ARCHIVED_RE = /^(Archived|Diarsipkan|Archiviert|Archivio|Archiviati|Archivados?|Archivada|Archive)$/i;
+			// Archived-view explanation copy ("These chats stay archived...")
+			// is UI guidance, never private content.
+			var WA_ARCHIVED_INFO_RE = /these chats stay archived|obrolan ini tetap diarsipkan/i;
+			function rowTextIsArchivedNav(text) {
+				return WA_ARCHIVED_RE.test(String(text || '').replace(/\s+/g, ' ').trim());
+			}
+			function tagArchivedNavIn(root) {
+				if (!root || !root.querySelectorAll) return;
+				var spans = root.querySelectorAll('span, [role="button"]');
+				for (var i = 0; i < spans.length; i++) {
+					var s = spans[i];
+					if (s.__waArchSeen) continue;
+					s.__waArchSeen = true;
+					try {
+						var t = (s.textContent || '').trim();
+						if (!rowTextIsArchivedNav(t)) continue;
+						// Only tag the navigation control itself, never a chat
+						// row that merely contains the word: the row holds far
+						// more text (name + preview + time), the control does not.
+						if (t.length > 24) continue;
+						var node = s;
+						for (var depth = 0; node && node !== root && depth < 6; depth++, node = node.parentElement) {
+							var nt = (node.textContent || '').trim();
+							if (nt.length > 24) break;
+							node.setAttribute('data-wa-archived-nav', '1');
+						}
+					} catch (e) {}
+				}
+			}
 			function tagTimesIn(root) {
 				if (!root || !root.querySelectorAll) return;
 				var spans = root.querySelectorAll('span:not([data-wa-time])');
@@ -1711,10 +1786,30 @@ func getInitScript(ua string) string {
 					} catch (e) {}
 				}
 			}
+			// Archive explanation copy is spared the same way timestamps are.
+			function tagArchiveInfoIn(root) {
+				if (!root || !root.querySelectorAll) return;
+				var spans = root.querySelectorAll('span, p, div');
+				var n = 0;
+				for (var i = 0; i < spans.length && n < 60; i++) {
+					var s = spans[i];
+					if (s.__waArchSeen) continue;
+					s.__waArchSeen = true;
+					n++;
+					try {
+						var t = (s.textContent || '').trim();
+						if (t.length > 12 && t.length < 220 && WA_ARCHIVED_INFO_RE.test(t)) {
+							s.setAttribute('data-wa-time', '1');
+						}
+					} catch (e) {}
+				}
+			}
 			setInterval(function() {
 				if (!isPrivacyActive || shouldPauseBackgroundWork()) return;
 				tagTimesIn(document.getElementById('main'));
 				tagTimesIn(document.getElementById('pane-side'));
+				tagArchivedNavIn(document.getElementById('pane-side'));
+				tagArchiveInfoIn(document.getElementById('pane-side'));
 			}, 3000);
 			window.setBlurAvatars = function(on) {
 				on = !!on;
@@ -1909,6 +2004,11 @@ func getInitScript(ua string) string {
 					var animStyle = document.createElement('style');
 					animStyle.id = 'wa-update-anim';
 					animStyle.textContent = '@keyframes waSlideDown { from { transform: translateY(-100%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }' +
+						// The banner is fixed-overlay, so the app root yields
+						// its height back while the banner is visible. Without
+						// this the banner covers WhatsApp's own top header
+						// (Archived row, back button) instead of pushing it down.
+						'html.wa-update-visible #app { height: calc(100% - var(--wa-update-banner-height, 0px)) !important; margin-top: var(--wa-update-banner-height, 0px) !important; }' +
 						'#wa-btn-update:hover { background: #029070 !important; transform: translateY(-1px); }' +
 						'#wa-btn-dismiss:hover { color: #e9edef !important; }';
 					document.head.appendChild(animStyle);
@@ -1979,8 +2079,26 @@ func getInitScript(ua string) string {
 
 				banner.appendChild(leftWrap);
 				banner.appendChild(rightWrap);
+				var bannerResizeObserver = null;
 				var bannerParent = document.body || document.documentElement;
-				if (bannerParent) bannerParent.appendChild(banner);
+				if (bannerParent) {
+					bannerParent.appendChild(banner);
+					// Track the live banner height (it grows when the
+					// download progress row appears) and yield that space
+					// from the app root. Disconnect on dismiss so no
+					// observer outlives the banner.
+					var layoutRoot = document.documentElement;
+					var syncBannerLayout = function() {
+						if (!banner.isConnected || !layoutRoot) return;
+						layoutRoot.style.setProperty('--wa-update-banner-height', banner.offsetHeight + 'px');
+						layoutRoot.classList.add('wa-update-visible');
+					};
+					syncBannerLayout();
+					if (window.ResizeObserver) {
+						bannerResizeObserver = new ResizeObserver(syncBannerLayout);
+						bannerResizeObserver.observe(banner);
+					}
+				}
 
 				try {
 					if ((!window.isNotificationsEnabled || window.isNotificationsEnabled()) && window.sendNativeNotification) {
@@ -2005,9 +2123,15 @@ func getInitScript(ua string) string {
 
 				btnDismiss.onclick = function() {
 					sessionStorage.setItem('dismissed_update_' + latestVersion, 'true');
+					if (bannerResizeObserver) {
+						bannerResizeObserver.disconnect();
+						bannerResizeObserver = null;
+					}
 					if (banner.parentNode) {
 						banner.parentNode.removeChild(banner);
 					}
+					document.documentElement.classList.remove('wa-update-visible');
+					document.documentElement.style.removeProperty('--wa-update-banner-height');
 				};
 			};
 
