@@ -9,6 +9,18 @@ for the tagged version to GitHub **verbatim** as the release notes. Conventions:
 - Everything under the heading until the next `## [` heading is published as-is.
 - Write for end users: what is new, what is fixed, and which file to download.
 
+## [v2.0.12] - 2026-09-29
+
+### ⚡ Performance
+
+- **Document previews scroll smoothly** — the full-viewport backdrop blur forced the compositor to re-render the page behind the modal on every scrolled frame. The overlay now uses a flat dim, every scroll surface is a containment boundary, and the card is layer-promoted, matching the built-in viewer's smoothness.
+
+### 🔄 Updating
+
+Updates arrive automatically in-app: WAtchful checks for new releases shortly after startup and every 4 hours, then downloads, installs, and restarts itself — you only approve. Accept the banner when it appears, or download the file for your platform from this release manually.
+
+**Full Changelog**: https://github.com/latiefahmad/WAtchful/compare/v2.0.11...v2.0.12
+
 ## [v2.0.11] - 2026-09-28
 
 ### 🛠 Fixed

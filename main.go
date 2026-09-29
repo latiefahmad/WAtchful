@@ -714,7 +714,7 @@ func getInitScript(ua string) string {
 
 		function parsePptxToHtml(slideXmls) {
 			if (!slideXmls || !slideXmls.length) return '';
-			var html = ['<div style="width:100%;height:100%;overflow-y:auto;padding:24px 16px;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;background:#0c1317;">'];
+			var html = ['<div style="width:100%;height:100%;overflow-y:auto;padding:24px 16px;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;background:#0c1317;contain:strict;">'];
 			for (var i = 0; i < slideXmls.length; i++) {
 				var xml = slideXmls[i];
 				if (!xml) continue;
@@ -836,10 +836,15 @@ func getInitScript(ua string) string {
 
 			var overlay = document.createElement('div');
 			overlay.id = 'wa-doc-modal-overlay';
-			overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);z-index:99999999;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;animation:waFadeIn 0.2s ease;';
+			// Flat dim, no backdrop blur: blurring the backdrop forces the
+			// compositor to re-render the page behind the modal on every
+			// scrolled frame, which made long previews scroll heavily.
+			overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);z-index:99999999;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;animation:waFadeIn 0.2s ease;';
 
 			var modal = document.createElement('div');
-			modal.style.cssText = 'width:94%;max-width:1020px;height:92%;background:#111b21;border:1px solid rgba(255,255,255,0.14);border-radius:12px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 24px 60px rgba(0,0,0,0.85);';
+			// Layer-promoted card: its own compositor layer, so scrolling the
+			// page behind (or inside) never repaints the whole overlay.
+			modal.style.cssText = 'width:94%;max-width:1020px;height:92%;background:#111b21;border:1px solid rgba(255,255,255,0.14);border-radius:12px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 24px 60px rgba(0,0,0,0.85);transform:translateZ(0);';
 
 			// Header
 			var header = document.createElement('div');
@@ -1002,7 +1007,7 @@ func getInitScript(ua string) string {
 				var tableStyle = '<style>#wa-xlsx-table{border-collapse:collapse;width:100%;font-family:system-ui,-apple-system,sans-serif;font-size:12px;color:#e9edef;}#wa-xlsx-table td,#wa-xlsx-table th{border:1px solid #2a3942;padding:6px 10px;white-space:nowrap;}#wa-xlsx-table tr:nth-child(even){background:#182229;}#wa-xlsx-table tr:nth-child(odd){background:#111b21;}</style>';
 
 				body.innerHTML = '<div style="width:100%;height:100%;display:flex;flex-direction:column;">' + tabsHtml +
-					'<div style="flex:1;overflow:auto;background:#111b21;">' + tableStyle + tableHtml + '</div></div>';
+					'<div style="flex:1;overflow:auto;background:#111b21;contain:strict;">' + tableStyle + tableHtml + '</div></div>';
 
 				var tabsEl = document.getElementById('wa-xlsx-tabs');
 				if (tabsEl) {
@@ -1056,8 +1061,8 @@ func getInitScript(ua string) string {
 					Promise.race([parsePromiseDoc, timeoutPromiseDoc]).then(function(docXml) {
 						if (docXml) {
 							var docHtml = parseDocxToHtml(docXml);
-							body.innerHTML = '' +
-								'<div style="width:100%;height:100%;overflow-y:auto;padding:24px 16px;box-sizing:border-box;display:flex;justify-content:center;background:#0c1317;">' +
+						body.innerHTML = '' +
+							'<div style="width:100%;height:100%;overflow-y:auto;padding:24px 16px;box-sizing:border-box;display:flex;justify-content:center;background:#0c1317;contain:strict;">' +
 								'  <div style="width:100%;max-width:760px;background:#ffffff;border-radius:6px;box-shadow:0 4px 20px rgba(0,0,0,0.5);padding:40px 48px;box-sizing:border-box;min-height:90%;">' +
 								docHtml +
 								'  </div>' +
@@ -1107,7 +1112,7 @@ func getInitScript(ua string) string {
 					var bytesTxt = new Uint8Array(binTxt.length);
 					for (var ti = 0; ti < binTxt.length; ti++) bytesTxt[ti] = binTxt.charCodeAt(ti);
 					var textContent = new TextDecoder('utf-8').decode(bytesTxt);
-					body.innerHTML = '<div style="width:100%;height:100%;overflow:auto;padding:24px;box-sizing:border-box;background:#111b21;color:#e9edef;font-family:monospace;font-size:13px;line-height:1.6;white-space:pre-wrap;">' +
+					body.innerHTML = '<div style="width:100%;height:100%;overflow:auto;padding:24px;box-sizing:border-box;background:#111b21;color:#e9edef;font-family:monospace;font-size:13px;line-height:1.6;white-space:pre-wrap;contain:strict;">' +
 						textContent.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') +
 						'</div>';
 				} catch (e) {

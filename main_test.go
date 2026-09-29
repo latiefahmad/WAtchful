@@ -955,6 +955,26 @@ func TestDismissStuckViewerIsBounded(t *testing.T) {
 	}
 }
 
+// The document preview overlay must scroll smoothly: a full-viewport
+// backdrop blur forces the compositor to re-render the page behind the
+// modal on every scrolled frame, and uncontained scroll surfaces repaint
+// the whole overlay. Flat dim + containment + a layer-promoted card.
+func TestDocumentPreviewScrollsSmoothly(t *testing.T) {
+	script := getInitScript("test-agent")
+	for _, want := range []string{
+		"transform:translateZ(0);",
+		"contain:strict;",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("preview scroll performance is missing %q", want)
+		}
+	}
+	if strings.Contains(script, "wa-doc-modal-overlay';backdrop-filter") ||
+		strings.Contains(script, "0.85);backdrop-filter") {
+		t.Error("the compositor-heavy preview backdrop blur is back")
+	}
+}
+
 // The Archived navigation control ("Archived"/"Diarsipkan"/...) is UI
 // guidance, not private chat data: it must stay readable in privacy mode
 // while archived rows themselves stay redacted. Tagged by text match with a

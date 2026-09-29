@@ -24,7 +24,7 @@ The screenshots use blurred chat content to protect personal information.
 
 **[Download the latest release →](https://github.com/latiefahmad/WAtchful/releases/latest)** — the page detects your OS and highlights the right file.
 
-Latest published release: **v2.0.11** ([release notes](https://github.com/latiefahmad/WAtchful/releases/tag/v2.0.11))
+Latest published release: **v2.0.12** ([release notes](https://github.com/latiefahmad/WAtchful/releases/tag/v2.0.12))
 
 | Platform | Download |
 | --- | --- |
@@ -107,6 +107,10 @@ Default data locations (settings, profile registry, logs):
 - Linux: `~/.config/WAtchful/`
 
 Inside, the Default profile keeps its session in `UserData/`, and every other profile gets an isolated folder under `Profiles/<profile>/`. Installs upgraded from older versions keep using their existing `WhatsAppDesk/` folder, so no session is lost.
+
+## Version 2.0.12
+
+- Document previews scroll as smoothly as the built-in viewer: flat dim overlay, contained scroll surfaces, layer-promoted card.
 
 ## Version 2.0.11
 
