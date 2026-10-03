@@ -1999,6 +1999,246 @@ func getInitScript(ua string) string {
 			});
 		})();
 
+		// Quick Replies: type "/trigger" + Space in the chat composer to
+		// expand a saved template. Stored in localStorage (per profile, since
+		// each profile owns its WebView data dir). Variables: {date},
+		// {time}, {name} (active chat title).
+		(function() {
+			var QR_KEY = 'wa_desk_quick_replies';
+			var QR_MAX = 50;
+
+			function normalizeQrTrigger(raw) {
+				var t = String(raw || '').trim().toLowerCase().replace(/^\//, '');
+				if (!/^[a-z0-9_-]{1,32}$/.test(t)) return '';
+				return t;
+			}
+			function loadQuickReplies() {
+				try {
+					var list = JSON.parse(localStorage.getItem(QR_KEY));
+					if (!Array.isArray(list)) return [];
+					var out = [];
+					for (var i = 0; i < list.length && out.length < QR_MAX; i++) {
+						var item = list[i] || {};
+						var trigger = normalizeQrTrigger(item.trigger);
+						var text = String(item.text || '').slice(0, 2000);
+						if (trigger && text) out.push({ trigger: trigger, text: text });
+					}
+					return out;
+				} catch (e) {
+					return [];
+				}
+			}
+			function saveQuickReplies(list) {
+				try {
+					localStorage.setItem(QR_KEY, JSON.stringify(list.slice(0, QR_MAX)));
+				} catch (e) {}
+			}
+			window.getQuickReplies = loadQuickReplies;
+			window.addQuickReply = function(trigger, text) {
+				trigger = normalizeQrTrigger(trigger);
+				text = String(text || '').trim().slice(0, 2000);
+				if (!trigger || !text) return null;
+				var list = loadQuickReplies().filter(function(q) { return q.trigger !== trigger; });
+				list.push({ trigger: trigger, text: text });
+				saveQuickReplies(list);
+				return trigger;
+			};
+			window.deleteQuickReply = function(trigger) {
+				saveQuickReplies(loadQuickReplies().filter(function(q) { return q.trigger !== trigger; }));
+			};
+
+			function activeChatName() {
+				try {
+					var titled = document.querySelector('#main header [title]');
+					if (titled) {
+						var name = (titled.getAttribute('title') || '').trim();
+						if (name) return name.slice(0, 60);
+					}
+					var header = document.querySelector('#main header');
+					if (header) {
+						var first = ((header.innerText || '').split('\n')[0] || '').trim();
+						if (first) return first.slice(0, 60);
+					}
+				} catch (e) {}
+				return '';
+			}
+			function expandQrVariables(text) {
+				var now = new Date();
+				var dateStr = now.toLocaleDateString();
+				var timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+				return String(text || '')
+					.split('{date}').join(dateStr)
+					.split('{time}').join(timeStr)
+					.split('{name}').join(activeChatName());
+			}
+
+			function findComposer() {
+				return document.querySelector('div[contenteditable="true"][role="textbox"]') ||
+					document.querySelector('div[contenteditable="true"]') ||
+					document.querySelector('textarea');
+			}
+			function caretAtEnd(el, range) {
+				try {
+					var end = document.createRange();
+					end.selectNodeContents(el);
+					end.collapse(false);
+					if (range.compareBoundaryPoints(Range.END_TO_END, end) === 0) return true;
+					// Tolerant: editors often keep trailing break nodes (or
+					// empty inline placeholders) after the caret. Only
+					// whitespace text and content-free elements may sit
+					// between the caret and the true end.
+					var tail = range.cloneRange();
+					tail.setEnd(end.endContainer, end.endOffset);
+					if (!/^[\s\u200b\ufeff]*$/.test(tail.toString())) return false;
+					var probe = tail.cloneContents();
+					var els = probe.querySelectorAll ? probe.querySelectorAll('*') : [];
+					for (var i = 0; i < els.length; i++) {
+						var tag = els[i].tagName || '';
+						if (/^BR$/i.test(tag)) continue;
+						if (((els[i].textContent || '').trim()) === '') continue;
+						return false;
+					}
+					return true;
+				} catch (e) {
+					return false;
+				}
+			}
+			// Resolve the token before the caret even when the caret sits
+			// between nodes (nodeType 1): use the previous text leaf.
+			function tokenBeforeCaret(range) {
+				var node = range.startContainer;
+				var soff = range.startOffset;
+				if (node && node.nodeType !== 3) {
+					var prev = (node.childNodes && soff > 0) ? node.childNodes[soff - 1] : null;
+					while (prev && prev.nodeType !== 3 && prev.lastChild) prev = prev.lastChild;
+					if (prev && prev.nodeType === 3) {
+						node = prev;
+						soff = (prev.textContent || '').length;
+					} else {
+						return null;
+					}
+				}
+				if (!node) return null;
+				var before = (node.textContent || '').slice(0, soff);
+				var m = before.match(/\/([a-z0-9_-]{1,32})$/i);
+				if (!m) return null;
+				return { node: node, offset: soff, text: m[0], trigger: m[1] };
+			}
+			// Space expands a trailing /trigger; Enter expands only a known
+			// trigger (otherwise the message must send as usual). Never fires
+			// inside our own overlays (Settings inputs, Direct Chat modal).
+			document.addEventListener('keydown', function(e) {
+				if (e.key !== ' ' && e.key !== 'Enter') return;
+				if (e.metaKey || e.ctrlKey || e.altKey) return;
+				var el = document.activeElement;
+				if (!el) return;
+				if (el.closest && el.closest('#wa-settings-overlay, #wa-directchat-overlay, #wa-doc-modal-overlay')) return;
+				var composer = findComposer();
+				if (!composer || (el !== composer && !composer.contains(el))) return;
+				var sel = window.getSelection();
+				if (!sel || !sel.isCollapsed || !sel.rangeCount) return;
+				var range = sel.getRangeAt(0);
+				if (!caretAtEnd(composer, range)) return;
+				var tok = null;
+				try {
+					tok = tokenBeforeCaret(range);
+				} catch (err) {
+					return;
+				}
+				if (!tok) return;
+				var trigger = normalizeQrTrigger(tok.trigger);
+				var found = null;
+				var list = loadQuickReplies();
+				for (var i = 0; i < list.length; i++) {
+					if (list[i].trigger === trigger) { found = list[i]; break; }
+				}
+				if (!found) {
+					// Diagnostic + UX: Space on an unknown /word tells the
+					// user instead of staying silent; Enter stays quiet so a
+					// normal message always sends.
+					if (e.key === ' ') {
+						showFloatingToast('⚡ No quick reply /' + trigger + ' — manage them in Settings');
+					}
+					return;
+				}
+				var expanded = expandQrVariables(found.text) + (e.key === ' ' ? ' ' : '');
+				if (!expanded.trim()) {
+					// Never destroy typed text when there is nothing to put
+					// in its place (empty template): leave the key alone and
+					// say why, for both Space and Enter.
+					showFloatingToast('⚡ Quick reply /' + trigger + ' is empty — edit it in Settings');
+					return;
+				}
+				e.preventDefault();
+				e.stopPropagation();
+				try {
+					var tokenLen = tok.text.length;
+					// Select exactly the "/trigger" token, then ask the
+					// editor to replace the live selection like real typing:
+					// frameworks (Lexical) honor synthetic beforeinput and
+					// apply it through their own model, while raw DOM surgery
+					// risks being reverted on reconcile.
+					var tokenRange = range.cloneRange();
+					tokenRange.setStart(tok.node, Math.max(0, tok.offset - tokenLen));
+					sel.removeAllRanges();
+					sel.addRange(tokenRange);
+					var handled = false;
+					try {
+						var bie = new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText', data: expanded });
+						handled = !composer.dispatchEvent(bie);
+					} catch (bieErr) {}
+					if (!handled) {
+						// No editor took it (plain contenteditable/textarea):
+						// do the replacement ourselves.
+						if (composer.tagName === 'TEXTAREA') {
+							var tv = composer.value || '';
+							var te = (typeof composer.selectionEnd === 'number') ? composer.selectionEnd : tv.length;
+							var nv = tv.slice(0, Math.max(0, te - tokenLen)) + expanded + tv.slice(te);
+							composer.value = nv;
+							var nc = Math.max(0, te - tokenLen) + expanded.length;
+							try { composer.selectionStart = composer.selectionEnd = nc; } catch (se) {}
+							composer.dispatchEvent(new Event('input', { bubbles: true }));
+						} else {
+							tokenRange.deleteContents();
+							var textNode = document.createTextNode(expanded);
+							tokenRange.insertNode(textNode);
+							var after = document.createRange();
+							after.setStartAfter(textNode);
+							after.collapse(true);
+							sel.removeAllRanges();
+							sel.addRange(after);
+							try {
+								composer.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: false, data: expanded, inputType: 'insertText' }));
+							} catch (evtErr) {}
+						}
+					}
+					// Self-verify instead of swallowing the key silently. Deferred:
+					// editor frameworks may commit the replacement async after
+					// the event dispatch returns, so a synchronous check would
+					// cry wolf while the text is still on its way in. Compare
+					// whitespace/zero-width normalized: editors re-encode
+					// spacing (NBSP, trailing trims) without changing looks.
+					var verifyCore = expanded.replace(/ $/, '');
+					var verifyToken = tok.text;
+					setTimeout(function() {
+						try {
+							var live = (composer.tagName === 'TEXTAREA') ? (composer.value || '') : (composer.textContent || '');
+							var norm = function(s) {
+								return String(s || '').replace(/[\u200b-\u200d\ufeff]/g, '').replace(/\s+/g, ' ').trim();
+							};
+							var gone = norm(live).indexOf(norm(verifyToken)) === -1;
+							var present = norm(live).indexOf(norm(verifyCore)) !== -1;
+							if (!gone || !present) {
+								showFloatingToast('⚠️ Gagal menyisipkan template — coba lagi');
+							}
+						} catch (ve) {}
+					}, 400);
+				} catch (err) {
+					try { document.execCommand('insertText', false, (e.key === ' ' ? ' ' : '')); } catch (e2) {}
+				}
+			}, true);
+		})();
+
 		// In-App Auto Updater UI and Handlers
 		(function() {
 			window.showUpdateBanner = function(latestVersion, releaseTitle, downloadUrl) {
@@ -3498,6 +3738,23 @@ func getInitScript(ua string) string {
 					'</label>';
 				modal.appendChild(folderSection);
 
+				// Section 2b: Quick Replies (slash templates for the composer).
+				var qrSection = document.createElement('div');
+				qrSection.className = 'wa-modal-card';
+				qrSection.style.cssText = 'display:flex;flex-direction:column;gap:8px;border-radius:0;border-width:0 0 1px;border-style:solid;padding:14px 0;';
+				qrSection.innerHTML = '' +
+					'<div style="display:flex;align-items:center;justify-content:space-between;">' +
+					'  <strong class="wa-text-primary" style="font-size:12.5px;">⚡ Quick Replies</strong>' +
+					'</div>' +
+					'<div class="wa-text-muted" style="font-size:11px;">Type <span style="font-family:monospace;">/trigger</span> + Space in any chat to expand a template. Variables: <span style="font-family:monospace;">{name}</span> <span style="font-family:monospace;">{date}</span> <span style="font-family:monospace;">{time}</span>.</div>' +
+					'<div id="wa-qr-list" style="display:flex;flex-direction:column;gap:6px;"></div>' +
+					'<div style="display:flex;gap:6px;">' +
+					'  <input id="wa-qr-trigger" placeholder="trigger e.g. followup" maxlength="32" style="width:130px;flex-shrink:0;padding:6px 8px;border-width:1px;border-style:solid;border-radius:6px;font-size:11.5px;font-family:monospace;background:transparent;color:inherit;outline:none;" />' +
+					'  <input id="wa-qr-text" placeholder="Template text..." maxlength="2000" style="flex:1;min-width:0;padding:6px 8px;border-width:1px;border-style:solid;border-radius:6px;font-size:11.5px;background:transparent;color:inherit;outline:none;" />' +
+					'  <button id="wa-qr-add" class="wa-card-btn" style="padding:6px 12px;border-radius:6px;font-size:11.5px;font-weight:600;cursor:pointer;border-width:1px;border-style:solid;flex-shrink:0;">Add</button>' +
+					'</div>';
+				modal.appendChild(qrSection);
+
 				// Section 3: Maintenance & Update Actions
 				var actionsSection = document.createElement('div');
 				actionsSection.className = 'wa-modal-card';
@@ -3920,6 +4177,66 @@ func getInitScript(ua string) string {
 								'🗂️ Downloads will be organized into monthly folders.' :
 								'🗂️ Downloads save directly to the folder again.');
 						}).catch(function() {});
+					};
+				}
+
+				// Quick Replies CRUD. User strings hit textContent only, never
+				// innerHTML, so a template cannot inject markup into Settings.
+				var qrList = document.getElementById('wa-qr-list');
+				var qrTrigger = document.getElementById('wa-qr-trigger');
+				var qrText = document.getElementById('wa-qr-text');
+				function renderQuickReplies() {
+					if (!qrList || !window.getQuickReplies) return;
+					qrList.textContent = '';
+					var list = window.getQuickReplies();
+					if (!list.length) {
+						var empty = document.createElement('div');
+						empty.className = 'wa-text-muted';
+						empty.style.cssText = 'font-size:11px;padding:2px 0;';
+						empty.textContent = 'No quick replies yet — add one below.';
+						qrList.appendChild(empty);
+						return;
+					}
+					for (var i = 0; i < list.length; i++) {
+						(function(item) {
+							var row = document.createElement('div');
+							row.style.cssText = 'display:flex;align-items:center;gap:8px;';
+							var chip = document.createElement('span');
+							chip.style.cssText = 'font-family:monospace;font-size:11px;font-weight:700;color:#00a884;flex-shrink:0;';
+							chip.textContent = '/' + item.trigger;
+							var preview = document.createElement('span');
+							preview.className = 'wa-text-muted';
+							preview.style.cssText = 'font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0;';
+							preview.textContent = item.text;
+							var del = document.createElement('button');
+							del.className = 'wa-card-btn';
+							del.style.cssText = 'padding:3px 9px;border-radius:6px;font-size:11px;cursor:pointer;border-width:1px;border-style:solid;flex-shrink:0;';
+							del.textContent = 'Delete';
+							del.onclick = function() {
+								if (window.deleteQuickReply) window.deleteQuickReply(item.trigger);
+								renderQuickReplies();
+							};
+							row.appendChild(chip);
+							row.appendChild(preview);
+							row.appendChild(del);
+							qrList.appendChild(row);
+						})(list[i]);
+					}
+				}
+				renderQuickReplies();
+				var qrAdd = document.getElementById('wa-qr-add');
+				if (qrAdd) {
+					qrAdd.onclick = function() {
+						if (!window.addQuickReply) return;
+						var saved = window.addQuickReply(qrTrigger ? qrTrigger.value : '', qrText ? qrText.value : '');
+						if (!saved) {
+							showFloatingToast('⚠️ Trigger a-z/0-9 and non-empty text required');
+							return;
+						}
+						if (qrTrigger) qrTrigger.value = '';
+						if (qrText) qrText.value = '';
+						renderQuickReplies();
+						showFloatingToast('⚡ Quick reply /' + saved + ' saved');
 					};
 				}
 			};

@@ -9,6 +9,19 @@ for the tagged version to GitHub **verbatim** as the release notes. Conventions:
 - Everything under the heading until the next `## [` heading is published as-is.
 - Write for end users: what is new, what is fixed, and which file to download.
 
+## [v2.0.13] - 2026-10-03
+
+### ⚡ Quick Replies
+
+- **Slash templates for the composer** — type `/trigger` + Space in any chat to expand a saved template, managed in Settings (add/delete, per profile). Supports `{name}`, `{date}` and `{time}` variables.
+- **Editor-safe insertion** — expansion goes through the editor's own input pipeline with fallbacks, caret handling for split text nodes, and a deferred self-check, so keys are never swallowed silently and failures say why instead of eating text.
+
+### 🔄 Updating
+
+Updates arrive automatically in-app: WAtchful checks for new releases shortly after startup and every 4 hours, then downloads, installs, and restarts itself — you only approve. Accept the banner when it appears, or download the file for your platform from this release manually.
+
+**Full Changelog**: https://github.com/latiefahmad/WAtchful/compare/v2.0.12...v2.0.13
+
 ## [v2.0.12] - 2026-09-29
 
 ### ⚡ Performance

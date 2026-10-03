@@ -179,6 +179,7 @@ func TestSettingsControlsRemainWired(t *testing.T) {
 		"wa-btn-change-folder", "wa-btn-open-folder", "wa-btn-reset-folder",
 		"wa-btn-check-updates-modal", "wa-btn-reload-modal", "wa-btn-hardref-modal", "wa-btn-onboard-modal",
 		"wa-action-open-directchat",
+		"wa-qr-trigger", "wa-qr-text", "wa-qr-add",
 		"wa-btn-run-diagnostics", "wa-btn-show-shortcuts",
 		"wa-zoom-out", "wa-zoom-in", "wa-zoom-reset",
 	}
@@ -1014,6 +1015,31 @@ func TestUpdateBannerReservesLayoutSpace(t *testing.T) {
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("update banner layout is missing %q", want)
+		}
+	}
+}
+
+// Quick Replies: /trigger + Space expands a saved template in the chat
+// composer (Enter only for a known trigger, otherwise the message sends as
+// usual); CRUD lives in Settings with user strings on textContent only.
+func TestQuickRepliesWiring(t *testing.T) {
+	script := getInitScript("test-agent")
+	for _, want := range []string{
+		"wa_desk_quick_replies",
+		"window.getQuickReplies",
+		"window.addQuickReply",
+		"window.deleteQuickReply",
+		"expandQrVariables",
+		"{date}",
+		"{time}",
+		"{name}",
+		"wa-qr-list",
+		"wa-qr-add",
+		"document.execCommand('insertText'",
+		"wa-settings-overlay, #wa-directchat-overlay, #wa-doc-modal-overlay",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("quick-reply wiring is missing %q", want)
 		}
 	}
 }
