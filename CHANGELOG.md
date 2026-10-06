@@ -9,6 +9,33 @@ for the tagged version to GitHub **verbatim** as the release notes. Conventions:
 - Everything under the heading until the next `## [` heading is published as-is.
 - Write for end users: what is new, what is fixed, and which file to download.
 
+## [v2.0.14] - 2026-10-06
+
+### 💬 AFK Auto-Reply
+
+- **Works with WhatsApp's new chat list** — the scanner understands the rebuilt row layout, opens the chat with a trusted click and verifies the header before typing, so a reply lands in the right conversation. A mismatch is logged and skipped instead of guessed.
+- **Reply hours** — restrict auto-replies to a chosen time range (overnight spans like 21:00–07:00 work), so chats outside those hours stay silent.
+- **Reply list** — optionally answer only the chats and numbers you list: names match partially (case-insensitive), numbers match by digits with or without `+62` / a leading `0`. Unlisted chats are skipped before any click and logged once per cooldown.
+- **Live status line** — Settings now says exactly why AFK is idle (off, empty message, outside hours, cooldown, Settings open, you were just active, and more), plus a one-click **Diagnose scan** that reports what the scanner sees in the chat list.
+
+### 📅 Scheduled Messages
+
+- **Repeat schedules** — send daily, weekly (pick the weekday), monthly (same date, clamped in short months), or yearly, in addition to one-time sends.
+
+### ⚙️ Settings
+
+- **Redesigned panel** — category tabs (General, Notifications, Privacy, Automation, Files, Help), live search across every setting, proper toggle switches, and a cleaner card layout that follows your theme.
+
+### ❤️ Support
+
+- **Donate button** — a Donate button now sits to the left of Direct Chat in the title strip and opens the Saweria page in your browser.
+
+### 🔄 Updating
+
+Updates arrive automatically in-app: WAtchful checks for new releases shortly after startup and every 4 hours, then downloads, installs, and restarts itself — you only approve. Accept the banner when it appears, or download the file for your platform from this release manually.
+
+**Full Changelog**: https://github.com/latiefahmad/WAtchful/compare/v2.0.13...v2.0.14
+
 ## [v2.0.13] - 2026-10-03
 
 ### ⚡ Quick Replies

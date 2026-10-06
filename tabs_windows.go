@@ -22,6 +22,7 @@ import (
 	"log"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -191,7 +192,8 @@ const (
 	tabDTSingle   = 0x0020
 	tabDTVCenter  = 0x0004
 
-	// Win32 tooltip (TOOLTIPS_CLASS) for the Direct Chat strip button.
+	// Win32 tooltip (TOOLTIPS_CLASS) for the strip buttons (Direct Chat +
+	// Donate).
 	tabWSPopup      = 0x80000000
 	tabWSExTopmost  = 0x00000008
 	tabTTSAlwaystip = 0x00000001
@@ -217,8 +219,11 @@ type tabToolInfo struct {
 }
 
 // tabTipText backs the tooltip string for the process lifetime: the
-// tooltip keeps the pointer, so it must never move or free.
+// tooltip keeps the pointer, so it must never move or free. One string
+// per strip tool (Donate + Direct Chat).
 var tabTipTextPtr, _ = windows.UTF16PtrFromString("Direct Chat")
+
+var tabDonateTipTextPtr, _ = windows.UTF16PtrFromString("Donate via Saweria")
 
 type tabWndClass struct {
 	Size, Style         uint32
@@ -407,6 +412,17 @@ func (v *chromiumView) Eval(js string)      { v.chromium.Eval(js) }
 func (v *chromiumView) Navigate(url string) { v.chromium.Navigate(url) }
 func (v *chromiumView) SetHtml(html string) { v.chromium.NavigateToString(html) }
 
+// callCDP runs a Chrome DevTools Protocol method on this tab's WebView2.
+// The page-side bridge (waCdpNative) uses it for Input.insertText: trusted
+// input is the only kind WhatsApp Web's composer accepts. cb runs later on
+// the WebView2 UI thread. WAtchful addition.
+func (v *chromiumView) callCDP(method, params string, cb func(hr uintptr, result string)) error {
+	if !v.isEmbedded() {
+		return errors.New("webview2 controller not embedded yet")
+	}
+	return v.chromium.CallCDP(method, params, cb)
+}
+
 // isEmbedded reports whether Embed has returned successfully. The vendor
 // layer nil-guards Suspend/Resume/SetBoundsRect/CloseController, but
 // Show/Hide/Eval/Navigate/Focus/Init dereference the controller directly:
@@ -565,11 +581,13 @@ type tabEntry struct {
 	recycleProbedAt time.Time
 }
 
-// tabBusyState counts in-page activity that must block a recycler rebuild:
-// downloads in flight and an open in-app document preview.
+// tabBusyState counts in-page activity that must block teardown:
+// downloads in flight, an open in-app document preview, and armed
+// scheduled sends (whose page timers die with the engine).
 type tabBusyState struct {
 	downloads int
 	docmodal  int
+	scheduled int
 }
 
 // tabSetProfileBusyState is installed by the tab shell for the page to
@@ -634,14 +652,17 @@ type tabShell struct {
 
 	isDark   bool
 	hoverTab int
-	// hoverDC tracks the Direct Chat strip button. Guarded by mu like
+	// hoverDC tracks the Direct Chat strip button. hoverDonate does the
+	// same for the Donate button left of it. Guarded by mu like
 	// hoverTab; read by the painter, written by the mouse handlers.
-	hoverDC bool
-	// tip is the Win32 tooltip window explaining the Direct Chat button.
-	// Created once with the strip; 0 until then (or if creation failed,
-	// in which case the button simply has no tooltip).
+	hoverDC     bool
+	hoverDonate bool
+	// tip is the Win32 tooltip window explaining the strip buttons
+	// (Donate + Direct Chat). Created once with the strip; 0 until then
+	// (or if creation failed, in which case the buttons simply have no
+	// tooltip).
 	tip uintptr
-	// tipToolAdded tracks whether the tool was already registered with
+	// tipToolAdded tracks whether the tools were already registered with
 	// TTM_ADDTOOL (later moves use TTM_NEWTOOLRECT).
 	tipToolAdded bool
 	// dpi is the window's current DPI (96 = 100%). The strip is owner-drawn,
@@ -1555,6 +1576,11 @@ type tabMetrics struct {
 	// dcW is the Direct Chat button width. It sits immediately left of the
 	// version tag so the chat entry is visible without opening Settings.
 	dcW int32
+	// donW is the Donate button width (label "Donate"). It sits immediately
+	// left of Direct Chat, so support stays one click away without opening
+	// Settings; it hides first on a cramped strip (Direct Chat keeps
+	// priority).
+	donW int32
 }
 
 func (m *tabShell) metrics() tabMetrics {
@@ -1575,6 +1601,7 @@ func (m *tabShell) metrics() tabMetrics {
 		badgeY: m.sc(8),
 		verW:   m.sc(64),
 		dcW:    m.sc(68),
+		donW:   m.sc(76),
 	}
 }
 
@@ -1685,6 +1712,35 @@ func (m *tabShell) directChatRect(clientW int32) (tabRect, bool) {
 	return r, true
 }
 
+// donateURL is the Saweria support page opened by the strip's Donate button.
+const donateURL = "https://saweria.co/latiefahmad"
+
+// openDonate launches the support page in the system browser. rundll32 is a
+// GUI-subsystem binary, so unlike "cmd /c start" it never flashes a console
+// window (same trick as previewDocument).
+func openDonate() {
+	_ = exec.Command("rundll32", "url.dll,FileProtocolHandler", donateURL).Start()
+}
+
+// donateRect returns the Donate button slot: immediately left of Direct
+// Chat (which itself sits left of the version tag). Hides before Direct
+// Chat does — tabs and the chat entry keep priority on a cramped strip.
+// Same scaled metrics as the painter, so hit-testing always matches what
+// is drawn.
+func (m *tabShell) donateRect(clientW int32) (tabRect, bool) {
+	dcr, ok := m.directChatRect(clientW)
+	if !ok {
+		return tabRect{}, false
+	}
+	mt := m.metrics()
+	if dcr.Left-mt.gap < mt.donW+mt.pad {
+		return tabRect{}, false
+	}
+	var r tabRect
+	r.Left, r.Top, r.Right, r.Bottom = dcr.Left-mt.gap-mt.donW, mt.top, dcr.Left-mt.gap, mt.stripH-mt.top
+	return r, true
+}
+
 // ensureTip creates the strip tooltip once. With TTF_SUBCLASS the tooltip
 // relays the strip's mouse messages itself, so no per-message plumbing is
 // needed afterwards — only the tool rect follows layout via moveTip.
@@ -1705,9 +1761,10 @@ func (m *tabShell) ensureTip() {
 	m.moveTip()
 }
 
-// moveTip points the tooltip at the current button slot (or an empty rect
-// when the button is hidden, so it never fires). Called from layoutOuter,
-// which already runs on every resize and DPI change.
+// moveTip points the tooltip at the current button slots (or empty rects
+// when a button is hidden, so it never fires). Called from layoutOuter,
+// which already runs on every resize and DPI change. Two tools share the
+// tooltip window: ID 1 = Direct Chat, ID 2 = Donate.
 func (m *tabShell) moveTip() {
 	if m.tip == 0 {
 		return
@@ -1715,24 +1772,35 @@ func (m *tabShell) moveTip() {
 	var r tabRect
 	tabGetClientRect.Call(m.strip, uintptr(unsafe.Pointer(&r)))
 	dcr, _ := m.directChatRect(r.Right - r.Left)
-	var ti tabToolInfo
-	ti.Size = uint32(unsafe.Sizeof(ti))
-	ti.Flags = tabTTFSubclass
-	ti.Hwnd = m.strip
-	ti.ID = 1
-	ti.Rect = dcr
+	dnr, _ := m.donateRect(r.Right - r.Left)
 	hinst, _, _ := tabGetModuleHandle.Call(0)
-	ti.Inst = hinst
-	ti.Text = uintptr(unsafe.Pointer(tabTipTextPtr))
+	tools := []struct {
+		id   uintptr
+		rect tabRect
+		text uintptr
+	}{
+		{1, dcr, uintptr(unsafe.Pointer(tabTipTextPtr))},
+		{2, dnr, uintptr(unsafe.Pointer(tabDonateTipTextPtr))},
+	}
 	// Timeout-guarded like the second-launch IPC: a wedged receiver must
 	// never hang the pump (see v2.0.6).
-	var tmRes uintptr
-	if m.tipToolAdded {
-		tabSendMessageTO.Call(m.tip, tabTTMNewToolRc, 0, uintptr(unsafe.Pointer(&ti)), 0, 1000, uintptr(unsafe.Pointer(&tmRes)))
-	} else {
-		tabSendMessageTO.Call(m.tip, tabTTMAddTool, 0, uintptr(unsafe.Pointer(&ti)), 0, 1000, uintptr(unsafe.Pointer(&tmRes)))
-		m.tipToolAdded = true
+	for _, t := range tools {
+		var ti tabToolInfo
+		ti.Size = uint32(unsafe.Sizeof(ti))
+		ti.Flags = tabTTFSubclass
+		ti.Hwnd = m.strip
+		ti.ID = t.id
+		ti.Rect = t.rect
+		ti.Inst = hinst
+		ti.Text = t.text
+		var tmRes uintptr
+		if m.tipToolAdded {
+			tabSendMessageTO.Call(m.tip, tabTTMNewToolRc, 0, uintptr(unsafe.Pointer(&ti)), 0, 1000, uintptr(unsafe.Pointer(&tmRes)))
+		} else {
+			tabSendMessageTO.Call(m.tip, tabTTMAddTool, 0, uintptr(unsafe.Pointer(&ti)), 0, 1000, uintptr(unsafe.Pointer(&tmRes)))
+		}
 	}
+	m.tipToolAdded = true
 }
 
 func (m *tabShell) paintStrip() {
@@ -1875,6 +1943,38 @@ func (m *tabShell) paintStrip() {
 		tabDrawText.Call(hdc, uintptr(unsafe.Pointer(vp)), uintptr(^uintptr(0)),
 			uintptr(unsafe.Pointer(&vr)), uintptr(tabDTRight|tabDTSingle|tabDTVCenter|tabDTNoPrefix))
 	}
+	// Donate button ("Donate", accent on transparent, rounded like Direct
+	// Chat) immediately left of Direct Chat: the support entry stays one
+	// click away without opening Settings. Same hover feedback and DPI-
+	// scaled metrics as its neighbour; a Win32 tooltip ("Donate via
+	// Saweria") explains it on hover. Clicking opens the system browser.
+	if dnr, dnOK := m.donateRect(area.Right - area.Left); dnOK {
+		m.mu.Lock()
+		dnHover := m.hoverDonate
+		m.mu.Unlock()
+		dnFill := bg
+		if dnHover {
+			dnFill = tabHover
+		}
+		dnPen, _, _ := tabCreatePen.Call(0, 0, accent) // PS_SOLID, 1px, accent
+		dnb, _, _ := tabCreateBrush.Call(dnFill)
+		oldPenDn, _, _ := tabSelectObject.Call(hdc, dnPen)
+		oldBrushDn, _, _ := tabSelectObject.Call(hdc, dnb)
+		tabRoundRect.Call(hdc, uintptr(dnr.Left), uintptr(dnr.Top), uintptr(dnr.Right), uintptr(dnr.Bottom),
+			uintptr(mt.radius/2), uintptr(mt.radius/2))
+		tabSelectObject.Call(hdc, oldPenDn)
+		tabSelectObject.Call(hdc, oldBrushDn)
+		tabDeleteObject.Call(dnPen)
+		tabDeleteObject.Call(dnb)
+		tabSetBkMode.Call(hdc, 1)
+		tabSetTextColor.Call(hdc, accent)
+		tabSelectObject.Call(hdc, m.fontBold)
+		var dtr tabRect
+		dtr.Left, dtr.Top, dtr.Right, dtr.Bottom = dnr.Left, dnr.Top, dnr.Right, dnr.Bottom
+		dtp, _ := windows.UTF16PtrFromString("Donate")
+		tabDrawText.Call(hdc, uintptr(unsafe.Pointer(dtp)), uintptr(^uintptr(0)),
+			uintptr(unsafe.Pointer(&dtr)), uintptr(tabDTCenter|tabDTSingle|tabDTVCenter|tabDTNoPrefix))
+	}
 	// Direct Chat button: "+" plus the Segoe MDL2 contact glyph, accent on
 	// transparent. A real icon font instead of hand-drawn shapes, so the
 	// glyph stays crisp at any DPI. A Win32 tooltip ("Direct Chat")
@@ -1938,6 +2038,11 @@ func stripWndProc(hwnd, m_, wp, lp uintptr) uintptr {
 		ly := int32((lp >> 16) & 0xFFFF)
 		var r tabRect
 		tabGetClientRect.Call(hwnd, uintptr(unsafe.Pointer(&r)))
+		if dnr, dnOK := m.donateRect(r.Right - r.Left); dnOK &&
+			lx >= dnr.Left && lx < dnr.Right && ly >= dnr.Top && ly < dnr.Bottom {
+			openDonate()
+			return 0
+		}
 		if dcr, dcOK := m.directChatRect(r.Right - r.Left); dcOK &&
 			lx >= dcr.Left && lx < dcr.Right && ly >= dcr.Top && ly < dcr.Bottom {
 			m.evalActive("if (window.openDirectChatModal) { window.openDirectChatModal(); }")
@@ -1964,6 +2069,11 @@ func stripWndProc(hwnd, m_, wp, lp uintptr) uintptr {
 			lx >= dcr.Left && lx < dcr.Right && ly >= dcr.Top && ly < dcr.Bottom {
 			dcHover = true
 		}
+		dnHover := false
+		if dnr, dnOK := m.donateRect(r.Right - r.Left); dnOK &&
+			lx >= dnr.Left && lx < dnr.Right && ly >= dnr.Top && ly < dnr.Bottom {
+			dnHover = true
+		}
 		changed := false
 		m.mu.Lock()
 		if hover != m.hoverTab {
@@ -1972,6 +2082,10 @@ func stripWndProc(hwnd, m_, wp, lp uintptr) uintptr {
 		}
 		if dcHover != m.hoverDC {
 			m.hoverDC = dcHover
+			changed = true
+		}
+		if dnHover != m.hoverDonate {
+			m.hoverDonate = dnHover
 			changed = true
 		}
 		m.mu.Unlock()
@@ -1986,9 +2100,10 @@ func stripWndProc(hwnd, m_, wp, lp uintptr) uintptr {
 		return 0
 	case tabWMMouseLeave:
 		m.mu.Lock()
-		if m.hoverTab != -1 || m.hoverDC {
+		if m.hoverTab != -1 || m.hoverDC || m.hoverDonate {
 			m.hoverTab = -1
 			m.hoverDC = false
+			m.hoverDonate = false
 			m.mu.Unlock()
 			tabInvalidateRect.Call(hwnd, 0, 0)
 		} else {
@@ -2009,6 +2124,16 @@ func (m *tabShell) sweepHidden() {
 	defer m.mu.Unlock()
 	for i, t := range m.tabs {
 		if i == m.active || t.hibernated || t.view == nil {
+			continue
+		}
+		m.busyMu.Lock()
+		scheduled := m.busy[t.profile.ID].scheduled
+		m.busyMu.Unlock()
+		if scheduled > 0 {
+			// A scheduled send is armed (or mid-flight): its page timers
+			// die with a suspend and its session with a hibernate, so the
+			// tab stays alive until the schedule clears. Trade-off, stated
+			// in Settings: scheduled profiles do not hibernate.
 			continue
 		}
 		if t.hiddenSince.IsZero() {
@@ -2042,19 +2167,26 @@ func (m *tabShell) setProfileBusyState(profileID, kind string, on bool) {
 	m.busyMu.Lock()
 	defer m.busyMu.Unlock()
 	switch kind {
-	case "download", "docmodal":
+	case "download", "docmodal", "scheduled":
 		st := m.busy[profileID]
-		if kind == "download" {
+		switch kind {
+		case "download":
 			if on {
 				st.downloads++
 			} else {
 				st.downloads--
 			}
-		} else {
+		case "docmodal":
 			if on {
 				st.docmodal++
 			} else {
 				st.docmodal--
+			}
+		case "scheduled":
+			if on {
+				st.scheduled++
+			} else {
+				st.scheduled--
 			}
 		}
 		if st.downloads < 0 {
@@ -2062,6 +2194,9 @@ func (m *tabShell) setProfileBusyState(profileID, kind string, on bool) {
 		}
 		if st.docmodal < 0 {
 			st.docmodal = 0
+		}
+		if st.scheduled < 0 {
+			st.scheduled = 0
 		}
 		m.busy[profileID] = st
 	case "query-docmodal":
@@ -2114,6 +2249,12 @@ func (m *tabShell) recycleActiveLocked(now time.Time) {
 	busy := m.busy[t.profile.ID]
 	m.busyMu.Unlock()
 	if busy.downloads > 0 {
+		return
+	}
+	if busy.scheduled > 0 {
+		// A scheduled send is armed, or the send routine is mid-flight
+		// (it holds the flag until it completes): rebuilding now would
+		// kill its page. Retried on a later sweep like the rest.
 		return
 	}
 	if busy.docmodal > 0 {

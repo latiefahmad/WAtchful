@@ -447,7 +447,9 @@ func TestStripShowsAppVersion(t *testing.T) {
 // The Direct Chat button lives right-aligned left of the version tag, from
 // the same scaled metrics as the painter. Tabs keep priority: a cramped
 // strip hides the button instead of overlapping it. Clicking it opens the
-// modal on the active tab.
+// modal on the active tab. The Donate button sits immediately left of
+// Direct Chat (same priority ladder: it hides first, Direct Chat keeps
+// its slot) and opens the Saweria page in the system browser.
 func TestDirectChatStripButtonRect(t *testing.T) {
 	m := &tabShell{dpi: 96}
 	r, ok := m.directChatRect(1084)
@@ -458,8 +460,26 @@ func TestDirectChatStripButtonRect(t *testing.T) {
 	if r.Left != 938 || r.Right != 1006 || r.Top != 4 || r.Bottom != 36 {
 		t.Fatalf("button rect = %+v, want {938 4 1006 36}", r)
 	}
+	// Donate: donW=76, gap=6 immediately left of Direct Chat.
+	dn, dnOK := m.donateRect(1084)
+	if !dnOK {
+		t.Fatal("donate must fit on a wide strip")
+	}
+	if dn.Left != 856 || dn.Right != 932 || dn.Top != 4 || dn.Bottom != 36 {
+		t.Fatalf("donate rect = %+v, want {856 4 932 36}", dn)
+	}
 	if _, ok := m.directChatRect(100); ok {
 		t.Fatal("button must hide on a cramped strip instead of overlapping tabs")
+	}
+	if _, ok := m.donateRect(100); ok {
+		t.Fatal("donate must hide on a cramped strip too")
+	}
+	// A strip this narrow keeps Direct Chat but drops Donate first.
+	if _, ok := m.directChatRect(200); !ok {
+		t.Fatal("direct chat must still fit at 200px")
+	}
+	if _, ok := m.donateRect(200); ok {
+		t.Fatal("donate must hide before direct chat does")
 	}
 	m.dpi = 192
 	r2, ok := m.directChatRect(2168)
@@ -468,6 +488,13 @@ func TestDirectChatStripButtonRect(t *testing.T) {
 	}
 	if r2.Left != 1876 || r2.Right != 2012 || r2.Top != 8 || r2.Bottom != 72 {
 		t.Fatalf("200%% button rect = %+v, want {1876 8 2012 72}", r2)
+	}
+	dn2, dn2OK := m.donateRect(2168)
+	if !dn2OK {
+		t.Fatal("donate must fit on a wide strip at 200%")
+	}
+	if dn2.Left != 1712 || dn2.Right != 1864 || dn2.Top != 8 || dn2.Bottom != 72 {
+		t.Fatalf("200%% donate rect = %+v, want {1712 8 1864 72}", dn2)
 	}
 
 	shell, err := os.ReadFile("tabs_windows.go")
@@ -486,6 +513,16 @@ func TestDirectChatStripButtonRect(t *testing.T) {
 		"fontIcon",
 		"0xE77B",
 		"m.sc(14)",
+		// Donate button: rect, hover, click-through to the browser, and
+		// its own tooltip tool alongside Direct Chat.
+		"func (m *tabShell) donateRect",
+		"const donateURL",
+		"saweria.co/latiefahmad",
+		"openDonate()",
+		"m.hoverDonate",
+		"tabDonateTipTextPtr",
+		"Donate via Saweria",
+		"{2, dnr, uintptr(unsafe.Pointer(tabDonateTipTextPtr))}",
 	} {
 		if !strings.Contains(string(shell), want) {
 			t.Errorf("strip direct-chat wiring is missing %q", want)
@@ -518,4 +555,52 @@ func TestChromiumViewRefusesEarlyControllerCalls(t *testing.T) {
 		t.Error("Resume on unembedded view must report false")
 	}
 	v.Destroy() // must return silently
+}
+
+// The scheduled-send counter follows the same transition protocol as the
+// other busy kinds (report on once, off once), clamped at zero, so an
+// armed tab stays alive through sweeps and recycles.
+func TestSetProfileBusyStateScheduledCounts(t *testing.T) {
+	m := &tabShell{busy: map[string]tabBusyState{}}
+	m.setProfileBusyState("p1", "scheduled", true)
+	m.setProfileBusyState("p1", "scheduled", true)
+	if got := m.busy["p1"].scheduled; got != 2 {
+		t.Fatalf("scheduled = %d, want 2", got)
+	}
+	m.setProfileBusyState("p1", "scheduled", false)
+	if got := m.busy["p1"].scheduled; got != 1 {
+		t.Fatalf("scheduled = %d, want 1", got)
+	}
+	m.setProfileBusyState("p1", "scheduled", false)
+	m.setProfileBusyState("p1", "scheduled", false)
+	if got := m.busy["p1"].scheduled; got != 0 {
+		t.Fatalf("scheduled = %d, want clamped 0", got)
+	}
+	// Other counters are untouched by scheduled traffic.
+	m.setProfileBusyState("p1", "download", true)
+	m.setProfileBusyState("p1", "scheduled", true)
+	st := m.busy["p1"]
+	if st.downloads != 1 || st.scheduled != 1 || st.docmodal != 0 {
+		t.Fatalf("counters mixed up: %+v", st)
+	}
+}
+
+// The page calls setBusyStateNative(kind, on) with two arguments; the
+// binding must take two and route the tab from its own context. The old
+// three-argument form never matched a real call, so every busy report
+// (downloads, docmodal, scheduled) was silently rejected and the recycler
+// gates never engaged.
+func TestBusyStateBindingTakesTwoArguments(t *testing.T) {
+	src, err := os.ReadFile("app_windows.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`w.Bind("setBusyStateNative", func(kind string, on bool)`,
+		"tabSetProfileBusyState(ctx.profile.ID, kind, on)",
+	} {
+		if !strings.Contains(string(src), want) {
+			t.Errorf("busy-state binding is missing %q", want)
+		}
+	}
 }

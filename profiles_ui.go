@@ -274,7 +274,10 @@ func getProfilesUIScript() string {
 					// Opaque from birth (same reason as the modal container): the
 					// theme sync below repaints it right away, but the card must
 					// never flash transparent if that pass is ever skipped.
-					card.style.cssText = 'display:flex;flex-direction:column;gap:8px;border-radius:0;border-width:0 0 1px;border-style:solid;padding:12px 0;background:#111b21;border-color:#2a3942;';
+					card.style.cssText = 'display:flex;flex-direction:column;gap:8px;border-radius:0;border-width:0 0 1px;border-style:solid;padding:12px 0;background:#111b21;border-color:#2a3942;' +
+						// Panel redesign overrides (after the legacy marker so the
+						// card matches the rounded sections around it).
+						'border-radius:12px;padding:14px 16px;background:#18262e;border-color:#2a3942;';
 					card.innerHTML = '' +
 						'<div style="display:flex;align-items:center;justify-content:space-between;gap:16px;">' +
 						'  <div>' +

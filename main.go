@@ -2239,6 +2239,2110 @@ func getInitScript(ua string) string {
 			}, true);
 		})();
 
+		// Scheduler: one-off / daily / weekly / monthly messages to phone
+		// numbers. Per-profile localStorage store (survives reloads). At fire
+		// time the tab persists a pending-send payload and navigates to the
+		// official /send?phone= deep link; the boot handler below completes
+		// it (wait composer -> insert -> send -> verify). Requires the app
+		// running with this profile's tab alive: tabs holding enabled
+		// schedules report busy('scheduled') so the shell neither suspends
+		// nor hibernates them (stated in Settings).
+		(function() {
+			// Per-evaluation id: every log line carries [boot/attempt] so a
+			// runaway's screenshot alone tells same-routine-looping apart
+			// from many-routines-firing.
+			var bootId = (function() {
+				try {
+					var a = new Uint32Array(1);
+					(window.crypto || window.msCrypto).getRandomValues(a);
+					return (a[0] % 1296).toString(36) + ((a[0] >> 6) % 1296).toString(36);
+				} catch (e) {
+					return Math.floor(Math.random() * 46656).toString(36);
+				}
+			})();
+			var SCHED_KEY = 'wa_desk_schedules';
+			var SCHED_LOG = 'wa_desk_schedule_log';
+			var PENDING_KEY = 'wa_desk_pending_send';
+			// Last successfully sent payload. A boot that finds a pending
+			// payload identical to the last completed send drops it silently:
+			// whatever replays boots (reload loops, renderer recovery) can
+			// never turn one schedule into duplicate sends.
+			var LAST_SENT_KEY = 'wa_desk_last_sent';
+			var SCHED_MAX = 100;
+			var LOG_MAX = 50;
+			var PENDING_TTL = 30 * 60 * 1000;
+			var TICK_MS = 20000;
+			var SEND_TIMEOUT = 20000;
+			// Burst breaker: no legitimate use completes many sends in
+			// minutes; a runaway (reload loops, wedged state) must stop
+			// cold instead of spamming the recipient. Sliding window,
+			// persisted so it survives the very reloads it guards against;
+			// it self-heals as the window slides, so paused schedules resume
+			// on their own instead of being lost.
+			var BURST_KEY = 'wa_desk_send_times';
+			var BURST_CAP = 10;
+			var BURST_WINDOW = 10 * 60 * 1000;
+			var breakerToasted = false;
+			// Per-payload single processing per page lifetime. Whatever
+			// invokes the send routine twice for one payload in one page
+			// (re-entrant timers, double boot handling), the second pass
+			// finds its key already here and stands down. Legitimate
+			// retries always carry a fresh payload (new queuedAt), so they
+			// are never blocked by this.
+			var seenPayloads = {};
+			// Emergency kill switch (Settings checkbox): when set, the tick
+			// never fires and boots never process pendings. Payloads stay
+			// stored, so re-enabling resumes normally.
+			var KILLED_KEY = 'wa_desk_sched_killed';
+			function schedKilled() {
+				try {
+					return localStorage.getItem(KILLED_KEY) === '1';
+				} catch (e) {
+					return false;
+				}
+			}
+			window.setSchedulerKilled = function(on) {
+				try {
+					localStorage.setItem(KILLED_KEY, on ? '1' : '0');
+				} catch (e) {}
+				// Killing withdraws any queued payload too, so "emergency
+				// stop" is visible immediately (log line + gone pending),
+				// not only honored at the next boot. Row data is kept; the
+				// schedule itself can fire again once un-killed.
+				if (on) {
+					try {
+						var pend = JSON.parse(localStorage.getItem(PENDING_KEY));
+						if (pend && pend.phone) {
+							localStorage.removeItem(PENDING_KEY);
+							pushSchedLog(pend.phone, pend.text || '', 'cancelled (emergency stop)');
+						}
+					} catch (e) {}
+				}
+				recountScheduledBusy();
+				return !schedKilled();
+			};
+			// True while a scheduled send attempt owns the composer; the
+			// AFK listener uses this to not mistake our own click for the
+			// user sending a message (which would turn AFK off silently).
+			window.__schedInFlight = function() { return sending; };
+			// Send choke-point: scheduler AND AFK route every intended
+			// composer send through window.__waGuardSend before typing or
+			// clicking. Gates, in order: the owner's kill switch (no
+			// violation counted), a minimum gap between sends persisted in
+			// localStorage (survives reloads — sub-second repetition is
+			// never legitimate), and a per-page budget. A first pace
+			// violation just blocks that send; a second one, or an
+			// exhausted budget, trips the EMERGENCY: both features killed
+			// with a loud log. Whatever path sends — known or future — it
+			// is bounded to a handful of attempts instead of hundreds.
+			var SEND_GAP_MS = 1000;
+			var SEND_BUDGET = 40;
+			var LAST_CLICK_KEY = 'wa_last_send_click';
+			var BUDGET_KEY = 'wa_send_budget';
+			var VIOL_KEY = 'wa_send_violations';
+			function emergencySendTrip(why) {
+				try { localStorage.setItem(KILLED_KEY, '1'); } catch (e) {}
+				try { localStorage.setItem('wa_desk_afk_killed', '1'); } catch (e) {}
+				pushSchedLog('', '', 'emergency stop: send ' + why + ' tripped [' + bootId + ']');
+				showFloatingToast('🛑 Send guard tripped (' + why + ') — scheduler and AFK halted');
+			}
+			window.__waGuardSend = function(owner) {
+				try {
+					var killKey = owner === 'afk' ? 'wa_desk_afk_killed' : KILLED_KEY;
+					if (localStorage.getItem(killKey) === '1') return { ok: false, why: 'kill' };
+				} catch (e) {
+					return { ok: false, why: 'kill' };
+				}
+				var now = Date.now();
+				var last = 0;
+				try { last = Number(localStorage.getItem(LAST_CLICK_KEY)) || 0; } catch (e) {}
+				if (last && now - last < SEND_GAP_MS) {
+					var viol = 0;
+					try { viol = parseInt(sessionStorage.getItem(VIOL_KEY), 10) || 0; } catch (e) {}
+					viol++;
+					try { sessionStorage.setItem(VIOL_KEY, String(viol)); } catch (e) {}
+					if (viol >= 2) {
+						emergencySendTrip('pace');
+						return { ok: false, why: 'emergency' };
+					}
+					return { ok: false, why: 'pace' };
+				}
+				var budget = SEND_BUDGET;
+				try {
+					var b = sessionStorage.getItem(BUDGET_KEY);
+					if (b !== null) {
+						budget = parseInt(b, 10) || 0;
+					} else {
+						sessionStorage.setItem(BUDGET_KEY, String(SEND_BUDGET));
+					}
+				} catch (e) {}
+				if (budget <= 0) {
+					emergencySendTrip('cap');
+					return { ok: false, why: 'emergency' };
+				}
+				try {
+					sessionStorage.setItem(BUDGET_KEY, String(budget - 1));
+					localStorage.setItem(LAST_CLICK_KEY, String(now));
+				} catch (e) {}
+				return { ok: true };
+			};
+			// ── Composer send pipeline (shared by scheduler and AFK) ───
+			// Insert ladder: native execCommand first (real editing
+			// pipeline, framework editors update their model), then
+			// synthetic beforeinput (Lexical intercepts it), then direct
+			// replace + an INPUT event. The input event is the crucial
+			// last rung: without it the app still believes the composer
+			// is empty — MIC never swaps to SEND, Enter no-ops, and the
+			// text sits there as an unsent draft.
+			window.__waComposerText = function(el) {
+				try {
+					return ((el.tagName === 'TEXTAREA' ? el.value : el.textContent) || '').trim();
+				} catch (e) { return ''; }
+			};
+			// Returns which rung landed the text: 'exec' | 'beforeinput'
+			// | 'dom' — '' means nothing took it. The caller logs the path
+			// so a field report shows exactly where delivery breaks.
+			window.__waInsertText = function(composer, text) {
+				text = String(text || '');
+				if (!composer || !text) return '';
+				try { composer.focus(); } catch (e) {}
+				function selectAll() {
+					try {
+						var sel = window.getSelection();
+						var r = document.createRange();
+						r.selectNodeContents(composer);
+						sel.removeAllRanges();
+						sel.addRange(r);
+					} catch (e) {}
+				}
+				try {
+					selectAll();
+					if (document.execCommand && document.execCommand('insertText', false, text) &&
+						window.__waComposerText(composer)) {
+						return 'exec';
+					}
+				} catch (e) {}
+				// PASTE: WhatsApp's paste handler writes through the editor
+				// MODEL (state stays synced → MIC becomes SEND). Direct
+				// typed-looking edits are trust-gated: the field log showed
+				// 'insert path=none len=0' because WhatsApp reverts them
+				// synchronously; paste does not go through that gate.
+				try {
+					selectAll();
+					var dt = null;
+					try {
+						if (typeof DataTransfer !== 'undefined') {
+							dt = new DataTransfer();
+							dt.setData('text/plain', text);
+						}
+					} catch (e) { dt = null; }
+					if (dt) {
+						try {
+							composer.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt }));
+						} catch (e) {}
+						if (window.__waComposerText(composer)) return 'paste';
+					}
+					try {
+						var bieP = new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertFromPaste', dataTransfer: dt || undefined });
+						composer.dispatchEvent(bieP);
+						if (window.__waComposerText(composer)) return 'paste';
+					} catch (e) {}
+					try {
+						var pe = new Event('paste', { bubbles: true, cancelable: true });
+						var shim = { getData: function(f) { return f === 'text/plain' ? text : ''; }, types: ['text/plain'] };
+						try { Object.defineProperty(pe, 'clipboardData', { value: shim, configurable: true }); }
+						catch (e2) { try { pe.clipboardData = shim; } catch (e3) {} }
+						composer.dispatchEvent(pe);
+						if (window.__waComposerText(composer)) return 'paste';
+					} catch (e) {}
+				} catch (e) {}
+				try {
+					selectAll();
+					var bie = new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText', data: text });
+					composer.dispatchEvent(bie);
+					if (window.__waComposerText(composer)) return 'beforeinput';
+				} catch (e) {}
+				try {
+					if (composer.tagName === 'TEXTAREA') {
+						composer.value = text;
+					} else {
+						composer.textContent = text;
+					}
+					// Try the data-carrying input first (state sync); if
+					// WhatsApp reverts it synchronously (trust gate), fall
+					// back to the plain input event older builds used —
+					// that one kept the text visible at least.
+					try {
+						composer.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: false, inputType: 'insertText', data: text }));
+					} catch (ie) {}
+					if (window.__waComposerText(composer)) return 'dom';
+					if (composer.tagName === 'TEXTAREA') {
+						composer.value = text;
+					} else {
+						composer.textContent = text;
+					}
+					composer.dispatchEvent(new Event('input', { bubbles: true }));
+					return window.__waComposerText(composer) ? 'dom-plain' : '';
+				} catch (e) { return ''; }
+			};
+			// ── Trusted-input bridge (WebView2 CDP) ────────────────────
+			// WhatsApp reverts every synthetic edit: the field log showed
+			// 'insert path=none len=0' for exec, paste, beforeinput and
+			// plain input alike (Lexical trust-gates typed-looking
+			// events). The only channel that produces isTrusted=true
+			// input at the renderer is the Chrome DevTools Protocol,
+			// exposed to the page by the waCdpNative host binding
+			// (Windows shell only — absent elsewhere, so callers fall
+			// back to the rung ladder above).
+			window.__waCdpCb = {};
+			window.__waCdpResult = function(payload) {
+				try {
+					var o = JSON.parse(payload);
+					var cb = window.__waCdpCb[o.id];
+					if (cb) {
+						delete window.__waCdpCb[o.id];
+						cb(o.ok ? o.result : null);
+					}
+				} catch (e) {}
+			};
+			window.__waCdp = function(method, params, cb) {
+				try {
+					if (typeof window.waCdpNative !== 'function') { cb(null); return; }
+					var id = 'c' + Date.now().toString(36) + Math.floor(Math.random() * 1e9).toString(36);
+					var fired = false;
+					function done(v) {
+						if (fired) return;
+						fired = true;
+						if (window.__waCdpCb[id]) delete window.__waCdpCb[id];
+						cb(v);
+					}
+					window.__waCdpCb[id] = done;
+					setTimeout(function() { done(null); }, 4000);
+					var p = window.waCdpNative(id, method, params);
+					function settle(v) { if (String(v).indexOf('ok') !== 0) done(null); }
+					if (p && typeof p.then === 'function') { p.then(settle, function() { done(null); }); }
+					else settle(p);
+				} catch (e) { cb(null); }
+			};
+			// Trusted insert: focus + select first (CDP routes input to
+			// the active element), then Input.insertText through the
+			// bridge. The completion callback runs after the text has
+			// landed in the composer.
+			window.__waTrustedInsert = function(composer, text, cb) {
+				try { composer.focus(); } catch (e) {}
+				try {
+					var sel = window.getSelection();
+					var r = document.createRange();
+					r.selectNodeContents(composer);
+					sel.removeAllRanges();
+					sel.addRange(r);
+				} catch (e) {}
+				window.__waCdp('Input.insertText', JSON.stringify({ text: String(text || '') }), function(res) {
+					if (res === null) { cb(''); return; }
+					cb(window.__waComposerText(composer).length ? 'cdp' : '');
+				});
+			};
+			// Insert orchestration: on the Windows shell the trusted
+			// channel goes FIRST (it is the only rung WhatsApp accepted
+			// in the field); its failures fall back to the rung ladder.
+			window.__waInsertAsync = function(composer, text, cb) {
+				if (typeof window.waCdpNative === 'function') {
+					window.__waTrustedInsert(composer, text, function(path) {
+						cb(path || (window.__waInsertText ? window.__waInsertText(composer, text) : ''));
+					});
+					return;
+				}
+				cb(window.__waInsertText ? window.__waInsertText(composer, text) : '');
+			};
+			// One send-button attempt: chat footer first, then broader
+			// scopes; accepts button or role="button" hosts, data-icon
+			// and data-testid variants, then LOCALIZED aria-labels
+			// (Indonesian UI says "Kirim", not "Send").
+			window.__waClickSend = function() {
+				var sels = [
+					'#main footer [data-icon="send"]',
+					'#main [data-icon="send"]',
+					'footer [data-icon="send"]',
+					'#main [data-testid="send"]',
+					'footer [data-testid="send"]',
+					'#main button[aria-label="Send"]',
+					'#main [role="button"][aria-label="Send"]',
+					'button[aria-label="Send"]',
+					'[data-icon="send"]'
+				];
+				for (var i = 0; i < sels.length; i++) {
+					var icon = null;
+					try { icon = document.querySelector(sels[i]); } catch (e) {}
+					if (!icon || !icon.closest) continue;
+					var btn = icon.closest('button, [role="button"]');
+					if (btn) {
+						btn.click();
+						return true;
+					}
+				}
+				// Localized label scan over the chat footer. Only
+				// send-ish labels qualify — never mic/record controls
+				// (clicking those would start a voice note).
+				try {
+					var f = document.querySelector('#main footer') || document.querySelector('footer');
+					if (f) {
+						var ctrls = f.querySelectorAll('button, [role="button"]');
+						var re = /^(send|kirim|enviar|envoyer|senden|invia|отправить|gönder|invio|送信|发送)\b/i;
+						for (var ci = 0; ci < ctrls.length; ci++) {
+							var lbl = String(ctrls[ci].getAttribute('aria-label') || '').trim();
+							if (re.test(lbl)) {
+								ctrls[ci].click();
+								return true;
+							}
+						}
+					}
+				} catch (e) {}
+				return false;
+			};
+			// What the chat footer currently offers — logged at send-wait
+			// start so a field report shows whether SEND was ever there.
+			window.__waFooterSnapshot = function() {
+				try {
+					var f = document.querySelector('#main footer') || document.querySelector('footer');
+					if (!f) return 'no-footer';
+					var ctrls = f.querySelectorAll('button, [role="button"]');
+					var out = [];
+					for (var i = 0; i < ctrls.length; i++) {
+						var ic = ctrls[i].querySelector('[data-icon]');
+						out.push((ctrls[i].getAttribute('aria-label') || '-') + ':' + (ic ? ic.getAttribute('data-icon') : '-'));
+					}
+					return out.length ? out.join('|') : 'no-ctrls';
+				} catch (e) { return 'err'; }
+			};
+			window.__waEnterSend = function(composer) {
+				try {
+					var ev = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true });
+					try {
+						// Belt: the constructor may drop keyCode/which in
+						// some engines; handlers that check 13 must not
+						// see a zeroed event.
+						Object.defineProperty(ev, 'keyCode', { get: function() { return 13; } });
+						Object.defineProperty(ev, 'which', { get: function() { return 13; } });
+					} catch (e) {}
+					composer.dispatchEvent(ev);
+					return true;
+				} catch (e) { return false; }
+			};
+			// Send stage: click the moment the button exists, keep
+			// polling while WhatsApp re-renders MIC→SEND after our
+			// insert, fire Enter at 1.5s as a fallback, and — new — KEEP
+			// polling after Enter so a late-rendering button still gets
+			// clicked (5s cap). Every outcome is logged to the scheduler
+			// log with the owner tag so a field report shows exactly
+			// where delivery stopped.
+			window.__waSendWithWait = function(composer, owner) {
+				owner = owner || 'sched';
+				var t0 = Date.now();
+				var done = false;
+				var enterFired = false;
+				function diag(msg) {
+					try { pushSchedLog('', '', 'diag(' + owner + '): ' + msg); } catch (e) {}
+				}
+				function attempt() {
+					if (done) return;
+					if (window.__waClickSend()) {
+						done = true;
+						diag('send clicked after ' + (Date.now() - t0) + 'ms' + (enterFired ? ' (after enter)' : ''));
+						return;
+					}
+					var el = Date.now() - t0;
+					if (!enterFired && el >= 1500) {
+						enterFired = true;
+						window.__waEnterSend(composer);
+						diag('enter fired at ' + el + 'ms, send button not found; footer=' + window.__waFooterSnapshot());
+					}
+					if (el >= 5000) {
+						done = true;
+						diag('no send trigger by ' + el + 'ms; footer=' + window.__waFooterSnapshot() +
+							' composerLen=' + window.__waComposerText(composer).length);
+						clearInterval(iv);
+					}
+				}
+				diag('send-wait start; footer=' + window.__waFooterSnapshot());
+				attempt();
+				if (done) return;
+				var iv = setInterval(function() {
+					attempt();
+					if (done) clearInterval(iv);
+				}, 100);
+			};
+			// Reboot-loop backstop: many boots in a few minutes means
+			// something is reloading the page underneath us, and every boot
+			// would otherwise attempt the pending send again. Freeze all
+			// scheduler activity while boots are that frequent; thaws on its
+			// own once boots calm down. Nothing is deleted while frozen.
+			var BOOT_KEY = 'wa_desk_sched_boots';
+			var FROZEN_KEY = 'wa_desk_sched_frozen_until';
+			var BOOT_WINDOW = 5 * 60 * 1000;
+			var BOOT_CAP = 8;
+			var FREEZE_MS = 30 * 60 * 1000;
+			var sending = false;
+			var scheduledBusyOn = false;
+
+			// Natural time parser for the scheduler ("2h", "tomorrow 08:00",
+			// "fri 18:00", "besok 08:00", "21:00"). English + Indonesian,
+			// pure function of (text, now) so it stays unit-testable.
+			// Returns epoch ms, or 0 when not understood.
+			var SCHED_UNITS = { h: 3600000, hour: 3600000, hours: 3600000, jam: 3600000,
+				m: 60000, min: 60000, mins: 60000, minute: 60000, minutes: 60000, menit: 60000,
+				d: 86400000, day: 86400000, days: 86400000, hari: 86400000,
+				w: 604800000, week: 604800000, weeks: 604800000, minggu: 604800000 };
+			var SCHED_DAYS = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6,
+				sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6,
+				ahad: 0, senin: 1, selasa: 2, rabu: 3, kamis: 4, jumat: 5, sabtu: 6,
+				min: 0, sen: 1, sel: 2, rab: 3, kam: 4, jum: 5, sab: 6 };
+			function parseSchedWhen(raw, nowMs) {
+				var now = new Date(typeof nowMs === 'number' ? nowMs : Date.now());
+				var s = String(raw || '').trim().toLowerCase().replace(/\s+/g, ' ');
+				if (!s) return 0;
+				var atTime = function(base, hh, mm) {
+					var d = new Date(base.getTime());
+					d.setHours(hh, mm, 0, 0);
+					return d.getTime();
+				};
+				// Relative: "2h", "30m", "1d", "1h30m", "2 jam", "besok"? no -
+				// combos of number+unit only.
+				var relBody = s.match(/^((?:\d+\s*(?:hours|hour|minutes|minute|mins|menit|minggu|min|weeks|week|days|day|hari|jam|h|m|d|w)\s*)+)$/);
+				if (relBody) {
+					var total = 0, ok = false;
+					var re = /(\d+)\s*(hours|hour|minutes|minute|mins|menit|minggu|min|weeks|week|days|day|hari|jam|h|m|d|w)/g;
+					var m;
+					while ((m = re.exec(relBody[1])) !== null) {
+						ok = true;
+						total += parseInt(m[1], 10) * (SCHED_UNITS[m[2]] || 0);
+					}
+					if (ok && total > 0 && total < 366 * 86400000) return now.getTime() + total;
+					return 0;
+				}
+				// Clock time today (else tomorrow): "21:00", "21.00".
+				var hm = s.match(/^(\d{1,2})[:.](\d{2})$/);
+				if (hm) {
+					var hh = parseInt(hm[1], 10), mm = parseInt(hm[2], 10);
+					if (hh > 23 || mm > 59) return 0;
+					var t = atTime(now, hh, mm);
+					return t > now.getTime() ? t : t + 86400000;
+				}
+				// today|hari ini [HH:MM], tomorrow|besok [HH:MM].
+				var day = s.match(/^(today|hari ini|tomorrow|besok)(?:\s+(\d{1,2})[:.](\d{2}))?$/);
+				if (day) {
+					var base = new Date(now.getTime());
+					if (day[1] === 'tomorrow' || day[1] === 'besok') base.setDate(base.getDate() + 1);
+					if (day[2] !== undefined) {
+						var hh2 = parseInt(day[2], 10), mm2 = parseInt(day[3], 10);
+						if (hh2 > 23 || mm2 > 59) return 0;
+						return atTime(base, hh2, mm2);
+					}
+					if (day[1] === 'today' || day[1] === 'hari ini') return now.getTime() + 3600000;
+					return atTime(base, 9, 0);
+				}
+				// Weekday [HH:MM], EN + ID: "fri 18:00", "jumat 18:00", "fri".
+				var wd = s.match(/^([a-z]+)(?:\s+(\d{1,2})[:.](\d{2}))?$/);
+				if (wd && Object.prototype.hasOwnProperty.call(SCHED_DAYS, wd[1])) {
+					var delta = (SCHED_DAYS[wd[1]] - now.getDay() + 7) % 7;
+					var base2 = new Date(now.getTime());
+					if (wd[2] !== undefined) {
+						var hh3 = parseInt(wd[2], 10), mm3 = parseInt(wd[3], 10);
+						if (hh3 > 23 || mm3 > 59) return 0;
+						var t3 = atTime(base2, hh3, mm3);
+						if (delta === 0 && t3 > now.getTime()) return t3;
+						base2.setDate(base2.getDate() + (delta === 0 ? 7 : delta));
+						return atTime(base2, hh3, mm3);
+					}
+					base2.setDate(base2.getDate() + (delta === 0 ? 7 : delta));
+					return atTime(base2, 9, 0);
+				}
+				return 0;
+			}
+			window.parseSchedWhen = parseSchedWhen;
+			function uid() {
+				return 's' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
+			}
+			function validSchedPhone(raw) {
+				var d = String(raw || '').trim().replace(/^\+/, '').replace(/[\s\-().]/g, '');
+				if (!/^[0-9]{8,15}$/.test(d)) return '';
+				return d;
+			}
+			function loadSchedules() {
+				try {
+					var list = JSON.parse(localStorage.getItem(SCHED_KEY));
+					if (!Array.isArray(list)) return [];
+					var out = [];
+					for (var i = 0; i < list.length && out.length < SCHED_MAX; i++) {
+						var s = list[i] || {};
+						var digits = validSchedPhone(s.phone);
+						var text = String(s.text || '').slice(0, 2000);
+					var nextFire = Number(s.nextFire) || 0;
+					var repeat = (s.repeat === 'daily' || s.repeat === 'weekly' || s.repeat === 'monthly' ||
+						s.repeat === 'yearly') ? s.repeat : 'once';
+					if (!digits || !text || !nextFire) continue;
+					var rd = Number(s.repeatDay);
+					var item = { id: String(s.id || uid()), phone: digits, text: text, nextFire: nextFire, repeat: repeat, enabled: s.enabled !== false, lastFiredAt: Number(s.lastFiredAt) || 0 };
+					if (repeat === 'weekly' && rd >= 0 && rd <= 6 && rd === Math.floor(rd)) item.repeatDay = rd;
+					var dmn = Number(s.dom);
+					if (dmn >= 1 && dmn <= 31 && dmn === Math.floor(dmn)) item.dom = dmn;
+					var ydn = Number(s.yday);
+					if (ydn >= 1 && ydn <= 31 && ydn === Math.floor(ydn)) item.yday = ydn;
+					out.push(item);
+					}
+					return out;
+				} catch (e) {
+					return [];
+				}
+			}
+			function saveSchedules(list) {
+				try {
+					localStorage.setItem(SCHED_KEY, JSON.stringify((list || []).slice(0, SCHED_MAX)));
+				} catch (e) {}
+				recountScheduledBusy();
+			}
+			function pushSchedLog(phone, text, status) {
+				try {
+					var log = [];
+					try {
+						var raw = JSON.parse(localStorage.getItem(SCHED_LOG));
+						if (Array.isArray(raw)) log = raw;
+					} catch (e) {}
+					log.unshift({ at: Date.now(), phone: String(phone || ''), text: String(text || '').slice(0, 80), status: status });
+					localStorage.setItem(SCHED_LOG, JSON.stringify(log.slice(0, LOG_MAX)));
+				} catch (e) {}
+			}
+			window.getSchedules = loadSchedules;
+			window.getScheduleLog = function() {
+				try {
+					var raw = JSON.parse(localStorage.getItem(SCHED_LOG));
+					return Array.isArray(raw) ? raw.slice(0, LOG_MAX) : [];
+				} catch (e) {
+					return [];
+				}
+			};
+			window.addSchedule = function(phone, text, whenMs, repeat, repeatDay) {
+				var digits = validSchedPhone(phone);
+				text = String(text || '').trim().slice(0, 2000);
+				whenMs = Number(whenMs) || 0;
+				if (!digits || !text || !(whenMs > Date.now())) return null;
+				if (repeat !== 'daily' && repeat !== 'weekly' && repeat !== 'monthly' &&
+					repeat !== 'yearly') repeat = 'once';
+				var item = { id: uid(), phone: digits, text: text, nextFire: whenMs, repeat: repeat, enabled: true };
+				if (repeat === 'weekly') {
+					// Chosen weekday (0=Sun..6=Sat) for every recurrence
+					// after the first fire; default = the weekday the
+					// first fire itself lands on.
+					var rd = Number(repeatDay);
+					item.repeatDay = (rd >= 0 && rd <= 6 && rd === Math.floor(rd)) ?
+						rd : new Date(whenMs).getDay();
+				} else if (repeat === 'monthly') {
+					// Original day-of-month so Jan 31 keeps coming back
+					// as 31 (clamped only in February).
+					item.dom = new Date(whenMs).getDate();
+				} else if (repeat === 'yearly') {
+					item.yday = new Date(whenMs).getDate();
+				}
+				var list = loadSchedules();
+				list.push(item);
+				saveSchedules(list);
+				return item.id;
+			};
+			window.deleteSchedule = function(id) {
+				saveSchedules(loadSchedules().filter(function(s) { return s.id !== id; }));
+			};
+			window.toggleSchedule = function(id, on) {
+				var list = loadSchedules();
+				for (var i = 0; i < list.length; i++) {
+					if (list[i].id === id) list[i].enabled = !!on;
+				}
+				saveSchedules(list);
+				// Switching a schedule off withdraws ITS queued payload:
+				// "off" must mean off, even when the payload was already
+				// fired and is waiting for the next boot to deliver it.
+				if (!on) {
+					try {
+						var pend = JSON.parse(localStorage.getItem(PENDING_KEY));
+						if (pend && pend.schedId === id) {
+							localStorage.removeItem(PENDING_KEY);
+							pushSchedLog(pend.phone, pend.text || '', 'cancelled (switched off)');
+							showFloatingToast('🚫 Scheduled send cancelled — schedule switched off');
+						}
+					} catch (e) {}
+				}
+			};
+			// Reports whether this tab currently holds work the shell must
+			// not tear down. Transitions only, like the other busy kinds.
+			// A killed engine holds nothing alive.
+			function recountScheduledBusy() {
+				var now = Date.now();
+				var n = 0;
+				if (!schedKilled()) {
+					var list = loadSchedules();
+					for (var i = 0; i < list.length; i++) {
+						if (list[i].enabled && list[i].nextFire > now) n++;
+					}
+					if (sending) n++;
+				}
+				var on = n > 0;
+				if (on !== scheduledBusyOn) {
+					scheduledBusyOn = on;
+					if (window.__waReportBusy) window.__waReportBusy('scheduled', on);
+				}
+			}
+			// Advance a fired schedule to its next occurrence. Pure
+			// function of (schedule, now) so the repeat matrix is
+			// unit-testable: once disables; daily/weekly step in fixed
+			// increments (weekly honoring a chosen weekday, repeatDay
+			// 0=Sun..6=Sat, always keeping the time of day); monthly
+			// clamps to the shortest month using the ORIGINAL
+			// day-of-month (dom, stored at add time — Jan 31 → Feb 28
+			// → Mar 31, not 3); yearly keeps month+day (yday) the same
+			// way, so Feb 29 skips to Feb 28 in common years and
+			// returns to Feb 29 in leap years.
+			function advanceSchedule(s, now) {
+				if (s.repeat === 'once') {
+					s.enabled = false;
+					return;
+				}
+				var DAY = 24 * 3600 * 1000;
+				if (s.repeat === 'daily') {
+					while (s.nextFire <= now) s.nextFire += DAY;
+					return;
+				}
+				if (s.repeat === 'weekly') {
+					var wd = (typeof s.repeatDay === 'number' && s.repeatDay >= 0 && s.repeatDay <= 6) ?
+						Math.floor(s.repeatDay) : -1;
+					if (wd < 0) {
+						// Legacy rows without a chosen weekday: same
+						// weekday as the original fire.
+						while (s.nextFire <= now) s.nextFire += 7 * DAY;
+						return;
+					}
+					var dw = new Date(s.nextFire);
+					do { dw.setDate(dw.getDate() + 1); } while (dw.getDay() !== wd);
+					s.nextFire = dw.getTime();
+					while (s.nextFire <= now) {
+						do { dw.setDate(dw.getDate() + 1); } while (dw.getDay() !== wd);
+						s.nextFire = dw.getTime();
+					}
+					return;
+				}
+				if (s.repeat === 'monthly') {
+					var day = Number(s.dom) || new Date(s.nextFire).getDate();
+					if (!(day >= 1 && day <= 31)) day = new Date(s.nextFire).getDate();
+					s.dom = day;
+					var dm = new Date(s.nextFire);
+					for (;;) {
+						dm.setDate(1);
+						dm.setMonth(dm.getMonth() + 1);
+						var dim = new Date(dm.getFullYear(), dm.getMonth() + 1, 0).getDate();
+						dm.setDate(Math.min(day, dim));
+						if (dm.getTime() > now) break;
+					}
+					s.nextFire = dm.getTime();
+					return;
+				}
+				if (s.repeat === 'yearly') {
+					var yd = Number(s.yday) || new Date(s.nextFire).getDate();
+					if (!(yd >= 1 && yd <= 31)) yd = new Date(s.nextFire).getDate();
+					s.yday = yd;
+					var dy = new Date(s.nextFire);
+					var mo = dy.getMonth();
+					for (;;) {
+						dy.setDate(1);
+						dy.setFullYear(dy.getFullYear() + 1);
+						dy.setMonth(mo);
+						var diy = new Date(dy.getFullYear(), mo + 1, 0).getDate();
+						dy.setDate(Math.min(yd, diy));
+						if (dy.getTime() > now) break;
+					}
+					s.nextFire = dy.getTime();
+					return;
+				}
+				// Unknown repeat value: behave like once.
+				s.enabled = false;
+			}
+			window.__waAdvanceSchedule = advanceSchedule;
+			function findSchedComposer() {
+				// The real composer lives in #main > footer. Newer
+				// layouts ALSO have a contenteditable search-in-
+				// conversation box in the header that matches first in
+				// document order — typing there produced text that never
+				// sends. Prefer footer; keep #main as the boundary
+				// (chat-list search lives outside #main).
+				var main = document.getElementById('main');
+				if (!main) return null;
+				var footer = main.querySelector('footer');
+				if (footer) {
+					var inFooter = footer.querySelector('div[contenteditable="true"][role="textbox"]') ||
+						footer.querySelector('div[contenteditable="true"]') ||
+						footer.querySelector('textarea');
+					if (inFooter) return inFooter;
+				}
+				return main.querySelector('div[contenteditable="true"][role="textbox"]') ||
+					main.querySelector('div[contenteditable="true"]') ||
+					main.querySelector('textarea');
+			}
+			// Burst breaker state: completion timestamps (persisted). True
+			// while completions inside the window reach the cap.
+			function burstTripped() {
+				var now = Date.now();
+				var stamps = [];
+				try {
+					var raw = JSON.parse(localStorage.getItem(BURST_KEY));
+					if (Array.isArray(raw)) stamps = raw;
+				} catch (e) {}
+				stamps = stamps.filter(function(t) { return (now - Number(t)) < BURST_WINDOW; });
+				try {
+					localStorage.setItem(BURST_KEY, JSON.stringify(stamps.slice(-BURST_CAP * 2)));
+				} catch (e) {}
+				return stamps.length >= BURST_CAP;
+			}
+			function recordSendCompletion() {
+				var now = Date.now();
+				var stamps = [];
+				try {
+					var raw = JSON.parse(localStorage.getItem(BURST_KEY));
+					if (Array.isArray(raw)) stamps = raw;
+				} catch (e) {}
+				stamps.push(now);
+				stamps = stamps.filter(function(t) { return (now - Number(t)) < BURST_WINDOW; });
+				try {
+					localStorage.setItem(BURST_KEY, JSON.stringify(stamps.slice(-BURST_CAP * 2)));
+				} catch (e) {}
+			}
+			function noteBreakerTripped() {
+				if (breakerToasted) return;
+				breakerToasted = true;
+				pushSchedLog('', '', 'paused: burst limit, resumes automatically');
+				showFloatingToast('⏰ Scheduler paused: too many sends — resumes automatically, check Settings');
+			}
+			function schedFrozen() {
+				try {
+					return Date.now() < (Number(localStorage.getItem(FROZEN_KEY)) || 0);
+				} catch (e) {
+					return false;
+				}
+			}
+			// Returns true when THIS boot trips the freeze (toast + log once
+			// here; later boots stay silent until it thaws).
+			function recordBootWatched() {
+				var now = Date.now();
+				var wasFrozen = schedFrozen();
+				var arr = [];
+				try {
+					var raw = JSON.parse(localStorage.getItem(BOOT_KEY));
+					if (Array.isArray(raw)) arr = raw;
+				} catch (e) {}
+				arr.push(now);
+				arr = arr.filter(function(t) { return (now - Number(t)) < BOOT_WINDOW; });
+				try {
+					localStorage.setItem(BOOT_KEY, JSON.stringify(arr.slice(-BOOT_CAP * 2)));
+				} catch (e) {}
+				if (arr.length >= BOOT_CAP && !wasFrozen) {
+					try {
+						localStorage.setItem(FROZEN_KEY, String(now + FREEZE_MS));
+					} catch (e) {}
+					pushSchedLog('', '', 'frozen: reboot loop detected, thaws automatically');
+					showFloatingToast('⏰ Scheduler frozen: app restarting repeatedly — resumes automatically');
+					return true;
+				}
+				return wasFrozen;
+			}
+			// Claim window: a send attempt owns its payload for this long.
+			// Another boot seeing a fresh claim skips instead of resending;
+			// a stale claim means the attempt died mid-flight (logged failed).
+			// This bounds every payload to one send attempt no matter how
+			// often the page reloads underneath it.
+			var CLAIM_TTL = 10 * 60 * 1000;
+			function fireSchedule(s) {
+				var now = Date.now();
+				// Never overwrite a payload another attempt owns: one
+				// in-flight send per boot is plenty.
+				try {
+					if (localStorage.getItem(PENDING_KEY)) return;
+				} catch (e) {}
+				// Persist first: a reload mid-flight must find correct state.
+				try {
+					localStorage.setItem(PENDING_KEY, JSON.stringify({ phone: s.phone, text: s.text, queuedAt: now, schedId: s.id }));
+				} catch (e) {}
+				var list = loadSchedules();
+				for (var i = 0; i < list.length; i++) {
+					if (list[i].id === s.id) {
+						advanceSchedule(list[i], now);
+						// Stamp the fire moment on the row: a later boot only
+						// honors a pending whose queuedAt matches this stamp,
+						// so deleting the schedule (or a stale leftover from
+						// an older build) cancels it instead of haunting.
+						list[i].lastFiredAt = now;
+					}
+				}
+				saveSchedules(list);
+				showFloatingToast('⏰ Sending scheduled message to +' + s.phone + '...');
+				window.location.href = 'https://web.whatsapp.com/send?phone=' + s.phone;
+			}
+			function completePendingSend() {
+				var pending = null;
+				try {
+					pending = JSON.parse(localStorage.getItem(PENDING_KEY));
+				} catch (e) {}
+				if (!pending || !pending.phone || !pending.text) return;
+				if (Date.now() - (Number(pending.queuedAt) || 0) > PENDING_TTL) {
+					try { localStorage.removeItem(PENDING_KEY); } catch (e) {}
+					pushSchedLog(pending.phone, pending.text, 'skipped (expired)');
+					return;
+				}
+				// The payload is only honored for a schedule row that still
+				// exists and fired it: deleting the schedule cancels the
+				// in-flight send instead of letting it haunt later boots.
+				// (A row the user switched off after firing still matches via
+				// lastFiredAt, so the in-flight send completes exactly once.)
+				var ownerRow = null;
+				var allRows = loadSchedules();
+				for (var ri = 0; ri < allRows.length; ri++) {
+					if (allRows[ri].id === pending.schedId) { ownerRow = allRows[ri]; break; }
+				}
+				if (!ownerRow || (!ownerRow.enabled && Number(ownerRow.lastFiredAt) !== Number(pending.queuedAt))) {
+					try { localStorage.removeItem(PENDING_KEY); } catch (e) {}
+					pushSchedLog(pending.phone, pending.text, 'cancelled (schedule removed)');
+					showFloatingToast('🚫 Scheduled send cancelled — schedule no longer exists');
+					return;
+				}
+				// Atomic claim: stamp ownership BEFORE touching the chat. A
+				// later boot seeing a fresh claim knows an attempt is alive
+				// (or died seconds ago) and must not start a second one; a
+				// stale claim means the attempt died mid-flight: log it
+				// failed and drop it instead of retry-spamming.
+				var claimedAt = Number(pending.claimedAt) || 0;
+				if (claimedAt && Date.now() - claimedAt < CLAIM_TTL) {
+					return;
+				}
+				if (claimedAt) {
+					try { localStorage.removeItem(PENDING_KEY); } catch (e) {}
+					pushSchedLog(pending.phone, pending.text, 'failed (interrupted)');
+					showFloatingToast('❌ Scheduled message to +' + pending.phone + ' was interrupted');
+					return;
+				}
+				pending.claimedAt = Date.now();
+				try {
+					localStorage.setItem(PENDING_KEY, JSON.stringify(pending));
+				} catch (e) {
+					return;
+				}
+				// Idempotency: this exact payload already went out (a replayed
+				// boot replays the send otherwise). Drop without a sound.
+				try {
+					var last = JSON.parse(localStorage.getItem(LAST_SENT_KEY));
+					if (last && last.schedId === pending.schedId &&
+						Number(last.queuedAt) === Number(pending.queuedAt)) {
+						localStorage.removeItem(PENDING_KEY);
+						return;
+					}
+				} catch (e) {}
+				// Burst breaker BEFORE touching the chat: a tripped breaker
+				// keeps the payload for later instead of dropping it.
+				if (burstTripped()) {
+					noteBreakerTripped();
+					return;
+				}
+				// One payload, one processing per page lifetime. A repeat
+				// sighting means a duplicate invocation, never a new send.
+				var payloadKey = String(pending.schedId) + '|' + String(pending.queuedAt);
+				if (seenPayloads[payloadKey]) {
+					return;
+				}
+				seenPayloads[payloadKey] = true;
+				sending = true;
+				recountScheduledBusy();
+				// Per-invocation id stamped into the log line: repeated sends
+				// with one id = one routine looping; many ids = many boots.
+				var attemptId = uid().slice(-4);
+				// Latches: clearInterval is belt, these are suspenders. If a
+				// timer object ever outlives its clear call in this runtime,
+				// the bodies below still execute at most once per routine.
+				var pollDone = false;
+				var sendDone = false;
+				var verifyDone = false;
+				var waited = 0;
+				var timer = setInterval(function() {
+					if (pollDone) return;
+					waited += 500;
+					var composer = findSchedComposer();
+					if (!composer && waited < SEND_TIMEOUT) return;
+					// Latch the polling stage itself: this interval may
+					// outlive clearInterval in a hostile runtime (the very
+					// failure class the field spam rode on). Only the
+					// completion decision arms it — the wait loop above
+					// must keep polling.
+					pollDone = true;
+					clearInterval(timer);
+					if (!composer) {
+						finishSend(pending, false);
+						return;
+					}
+					// Re-checks before typing: kill or a Settings action
+					// may have withdrawn the payload AFTER claim. Never
+					// type text we won't send.
+					if (schedKilled()) {
+						finishSend(pending, false, 'cancelled (emergency stop)');
+						return;
+					}
+					try {
+						if (!localStorage.getItem(PENDING_KEY)) {
+							finishSend(pending, false, 'cancelled (pending withdrawn)');
+							return;
+						}
+					} catch (e) {}
+					var guard = window.__waGuardSend ? window.__waGuardSend('sched') : { ok: true };
+					if (!guard.ok) {
+						finishSend(pending, false, (guard.why === 'pace' || guard.why === 'cap') ?
+							('blocked (send ' + guard.why + ')') : 'cancelled (emergency stop)');
+						return;
+					}
+					try { composer.focus(); } catch (e) {}
+					// Insert may travel the trusted CDP channel, which is
+					// asynchronous: everything after it runs from
+					// beginSend inside the insert callback.
+					function beginSend(insertPath) {
+						pushSchedLog(pending.phone, pending.text, 'diag: insert path=' + (insertPath || 'none') +
+							' composer=' + (composer.closest && composer.closest('footer') ? 'footer' : 'main') +
+							' len=' + window.__waComposerText(composer).length);
+						if (!insertPath) {
+							finishSend(pending, false);
+							return;
+						}
+						// Latched: one send per routine no matter what.
+						if (sendDone) {
+							return;
+						}
+						sendDone = true;
+						// Click the send button once it has rendered: our
+						// insert updates WhatsApp's state asynchronously
+						// (MIC→SEND swap), so a synchronous lookup raced the
+						// render and dropped to an Enter that many builds
+						// ignore — text stayed as an unsent draft. Enter is
+						// the first fallback; a late button still gets
+						// clicked afterwards.
+						window.__waSendWithWait(composer, 'sched');
+						var checks = 0;
+						var verify = setInterval(function() {
+							if (verifyDone) return;
+							checks++;
+							var txt = '';
+							try {
+								txt = ((composer.tagName === 'TEXTAREA' ? composer.value : composer.textContent) || '').trim();
+							} catch (e) {}
+						if (txt === '' || checks >= 16) {
+							verifyDone = true;
+							clearInterval(verify);
+							finishSend(pending, txt === '');
+							}
+						}, 500);
+					}
+					window.__waInsertAsync(composer, pending.text, function(insertPath) {
+						// The async gap lets kill/withdraw land mid-flight:
+						// re-check both before the send stage starts.
+						if (schedKilled()) {
+							finishSend(pending, false, 'cancelled (emergency stop)');
+							return;
+						}
+						try {
+							if (!localStorage.getItem(PENDING_KEY)) {
+								finishSend(pending, false, 'cancelled (pending withdrawn)');
+								return;
+							}
+						} catch (e) {}
+						beginSend(insertPath);
+					});
+				}, 500);
+				var finishedSend = false;
+				function finishSend(p, ok, failStatus) {
+					if (finishedSend) return;
+					finishedSend = true;
+					try { localStorage.removeItem(PENDING_KEY); } catch (e) {}
+					if (ok) {
+						recordSendCompletion();
+						try {
+							localStorage.setItem(LAST_SENT_KEY, JSON.stringify({ schedId: p.schedId, queuedAt: p.queuedAt }));
+						} catch (e) {}
+					}
+					sending = false;
+					recountScheduledBusy();
+					var tag = ' [' + bootId + '/' + attemptId + ']';
+					pushSchedLog(p.phone, p.text, (ok ? 'sent' : (failStatus || 'failed')) + tag);
+					showFloatingToast(ok ? ('✅ Scheduled message sent to +' + p.phone) : ('❌ Scheduled message to +' + p.phone + ' failed'));
+				}
+			}
+			setInterval(function() {
+				// Headless tabs still fire: page timers run while the engine
+				// is alive (the busy report keeps it that way).
+				if (sending) return;
+				if (schedKilled()) return;
+				// An AFK auto-reply owns the composer right now: firing
+				// would navigate mid-attempt and kill it. The next tick
+				// (20s later) fires instead — schedules stay armed.
+				if (window.__afkInFlight && window.__afkInFlight()) return;
+				if (burstTripped()) {
+					noteBreakerTripped();
+					return;
+				}
+				var now = Date.now();
+				var list = loadSchedules();
+				for (var i = 0; i < list.length; i++) {
+					if (list[i].enabled && list[i].nextFire <= now) {
+						fireSchedule(list[i]);
+						return;
+					}
+				}
+			}, TICK_MS);
+			var bootFroze = recordBootWatched();
+			if (!bootFroze && !schedFrozen() && !schedKilled()) {
+				recountScheduledBusy();
+				completePendingSend();
+			}
+		})();
+
+		// AFK auto-reply: while armed, every chat that shows new unread gets
+		// ONE automatic reply per cooldown window; the moment YOU send a
+		// message yourself the mode turns itself off. Safety mirrors the
+		// scheduler: emergency kill, per-chat cooldown claimed BEFORE any
+		// click, burst breaker, in-flight marker for boot recovery, timer
+		// latches, and an identity check that refuses to type into any chat
+		// other than the row that was clicked. Yields the composer entirely
+		// while a scheduler payload is queued (never two senders at once).
+		(function() {
+			var CFG_KEY = 'wa_desk_afk_cfg';
+			var LAST_KEY = 'wa_desk_afk_last';
+			var BURST_KEY = 'wa_desk_afk_send_times';
+			var LOG_KEY = 'wa_desk_afk_log';
+			var KILLED_KEY = 'wa_desk_afk_killed';
+			var INFLIGHT_KEY = 'wa_desk_afk_inflight';
+			var SCHED_PENDING_KEY = 'wa_desk_pending_send';
+			var TICK_MS = 5000;
+			var BURST_CAP = 8;
+			var BURST_WINDOW = 10 * 60 * 1000;
+			var LOG_MAX = 20;
+			var bootId = (function() {
+				try {
+					var a = new Uint32Array(1);
+					(window.crypto || window.msCrypto).getRandomValues(a);
+					// >>> not >>: Uint32 above 2^31 would sign-extend and
+					// put a '-' into the id.
+					return (a[0] % 1296).toString(36) + ((a[0] >>> 6) % 1296).toString(36);
+				} catch (e) {
+					return Math.floor(Math.random() * 46656).toString(36);
+				}
+			})();
+			var sending = false;
+			var busyOn = false;
+			var breakerToasted = false;
+			// Last genuine (trusted) user input anywhere on the page. Our
+			// own synthetic row presses are untrusted and must not count,
+			// or every attempt would silence the tick for 30s afterwards.
+			var lastUserActivityAt = 0;
+			try {
+				['keydown', 'mousedown', 'wheel'].forEach(function(t) {
+					document.addEventListener(t, function(e) {
+						try { if (e && e.isTrusted) lastUserActivityAt = Date.now(); } catch (e2) {}
+					}, true);
+				});
+			} catch (e) {}
+			function clampDayMin(v, fallback) {
+				var n = Math.floor(Number(v));
+				if (!(n >= 0 && n < 1440)) return fallback;
+				return n;
+			}
+			function loadAfkCfg() {
+				try {
+					var c = JSON.parse(localStorage.getItem(CFG_KEY)) || {};
+					var cd = Number(c.cooldownMin);
+					var allowed = [];
+					try {
+						if (Array.isArray(c.allowed)) {
+							for (var ai = 0; ai < c.allowed.length && allowed.length < 50; ai++) {
+								var as = String(c.allowed[ai] || '').trim().slice(0, 80);
+								if (as) allowed.push(as);
+							}
+						}
+					} catch (e2) {}
+					return {
+						enabled: c.enabled === true,
+						text: String(c.text || '').slice(0, 500),
+						cooldownMin: (cd === 5 || cd === 30 || cd === 60) ? cd : 10,
+						groups: c.groups === true,
+						// Daily reply window (minutes since midnight). Off by
+						// default: legacy configs keep replying around the
+						// clock until the user opts in.
+						useWindow: c.useWindow === true,
+						startMin: clampDayMin(c.startMin, 21 * 60),
+						endMin: clampDayMin(c.endMin, 7 * 60),
+						// Reply allowlist: when on, only listed chats get
+						// replies. Entries are names (partial, case-
+						// insensitive) or numbers (digit-compared).
+						allowOnly: c.allowOnly === true,
+						allowed: allowed
+					};
+				} catch (e) {
+					return { enabled: false, text: '', cooldownMin: 10, groups: false, useWindow: false, startMin: 21 * 60, endMin: 7 * 60, allowOnly: false, allowed: [] };
+				}
+			}
+			function saveAfkCfg(c) {
+				try { localStorage.setItem(CFG_KEY, JSON.stringify(c)); } catch (e) {}
+			}
+			// Pure function of (config, now): true when the clock is inside
+			// the daily reply window. Overnight spans (e.g. 21:00-07:00)
+			// wrap past midnight; start === end means the whole day.
+			function afkInWindow(cfg, nowMs) {
+				cfg = cfg || {};
+				if (cfg.useWindow !== true) return true;
+				var s = Number(cfg.startMin), e = Number(cfg.endMin);
+				if (!(s >= 0 && s < 1440) || !(e >= 0 && e < 1440)) return true;
+				if (s === e) return true;
+				var d = new Date(typeof nowMs === 'number' ? nowMs : Date.now());
+				var mins = d.getHours() * 60 + d.getMinutes();
+				if (s < e) return mins >= s && mins < e;
+				return mins >= s || mins < e;
+			}
+			window.__waAfkInWindow = afkInWindow;
+			// Pure: may this chat name receive replies under the allowlist?
+			// Off (or empty list + off) allows everything; an enabled empty
+			// list allows nothing. Entries WITH letters match partially
+			// case-insensitively; purely numeric entries match by digits
+			// only (8+ digits, one leading 62/0 tolerated), so 62812…,
+			// 0812… and +62 812-… all find each other while a fragment
+			// like "12" never matches a name by accident.
+			function afkAllowed(cfg, key) {
+				cfg = cfg || {};
+				if (cfg.allowOnly !== true) return true;
+				var list = Array.isArray(cfg.allowed) ? cfg.allowed : [];
+				if (!list.length) return false;
+				var k = String(key || '').toLowerCase().trim();
+				if (!k) return false;
+				var kd = k.replace(/\D/g, '');
+				for (var i = 0; i < list.length; i++) {
+					var e = String(list[i] || '').toLowerCase().trim();
+					if (!e) continue;
+					if (/[a-z]/i.test(e) && (k.indexOf(e) !== -1 || e.indexOf(k) !== -1)) return true;
+					var ed = e.replace(/\D/g, '');
+					if (ed.length >= 8 && kd.length >= 8) {
+						var kn = kd.replace(/^(62|0)/, '');
+						var en = ed.replace(/^(62|0)/, '');
+						if (kn && en && (kn.indexOf(en) !== -1 || en.indexOf(kn) !== -1)) return true;
+					}
+				}
+				return false;
+			}
+			window.__waAfkAllowed = afkAllowed;
+			// "HH:MM" <-> minutes helpers shared with the Settings inputs.
+			window.__waAfkMinsToHM = function(m) {
+				m = clampDayMin(m, 0);
+				var h = Math.floor(m / 60), mm = m % 60;
+				return (h < 10 ? '0' : '') + h + ':' + (mm < 10 ? '0' : '') + mm;
+			};
+			window.__waAfkHMToMins = function(str) {
+				var m = /^(\d{1,2}):(\d{1,2})$/.exec(String(str || '').trim());
+				if (!m) return -1;
+				var h = Number(m[1]), mm = Number(m[2]);
+				if (!(h >= 0 && h < 24 && mm >= 0 && mm < 60)) return -1;
+				return h * 60 + mm;
+			};
+			// Armed = enabled + not killed + non-empty text + inside the
+			// reply window; without text there is nothing to send, so never
+			// report busy or scan. Outside the window the tick stands down
+			// (and the tab may hibernate) until the hours come back.
+			function afkArmed() {
+				var c = loadAfkCfg();
+				if (!c.enabled || !c.text) return false;
+				if (!afkInWindow(c, Date.now())) return false;
+				try { return localStorage.getItem(KILLED_KEY) !== '1'; } catch (e) { return false; }
+			}
+			window.getAfkConfig = loadAfkCfg;
+			window.setAfkConfig = function(patch) {
+				var c = loadAfkCfg();
+				patch = patch || {};
+				if (typeof patch.enabled === 'boolean') c.enabled = patch.enabled;
+				if (typeof patch.text === 'string') c.text = patch.text.slice(0, 500);
+				if (patch.cooldownMin === 5 || patch.cooldownMin === 30 || patch.cooldownMin === 60) {
+					c.cooldownMin = patch.cooldownMin;
+				}
+				if (typeof patch.groups === 'boolean') c.groups = patch.groups;
+				if (typeof patch.useWindow === 'boolean') c.useWindow = patch.useWindow;
+				if (typeof patch.allowOnly === 'boolean') c.allowOnly = patch.allowOnly;
+				if (typeof patch.allowed === 'string' || Array.isArray(patch.allowed)) {
+					var rawList = (typeof patch.allowed === 'string') ? patch.allowed.split(/\n/) : patch.allowed;
+					var cleanList = [];
+					for (var li = 0; li < rawList.length && cleanList.length < 50; li++) {
+						var ls = String(rawList[li] || '').trim().slice(0, 80);
+						if (ls) cleanList.push(ls);
+					}
+					c.allowed = cleanList;
+				}
+				var sm = (typeof patch.startMin === 'string') ?
+					window.__waAfkHMToMins(patch.startMin) : Math.floor(Number(patch.startMin));
+				if (sm >= 0 && sm < 1440) c.startMin = sm;
+				var em = (typeof patch.endMin === 'string') ?
+					window.__waAfkHMToMins(patch.endMin) : Math.floor(Number(patch.endMin));
+				if (em >= 0 && em < 1440) c.endMin = em;
+				// Arming without a message is meaningless: clamp instead of
+				// scanning unread forever with nothing to say.
+				if (c.enabled && !c.text) c.enabled = false;
+				saveAfkCfg(c);
+				recountAfkBusy();
+				return loadAfkCfg();
+			};
+			window.setAFKKilled = function(on) {
+				try { localStorage.setItem(KILLED_KEY, on ? '1' : '0'); } catch (e) {}
+				recountAfkBusy();
+				// Reports whether replying is allowed (not killed), like
+				// setSchedulerKilled.
+				try { return localStorage.getItem(KILLED_KEY) !== '1'; } catch (e) { return false; }
+			};
+			window.getAfkLog = function() {
+				try {
+					var raw = JSON.parse(localStorage.getItem(LOG_KEY));
+					return Array.isArray(raw) ? raw.slice(0, LOG_MAX) : [];
+				} catch (e) {
+					return [];
+				}
+			};
+			function pushAfkLog(chat, status) {
+				try {
+					var log = [];
+					try {
+						var raw = JSON.parse(localStorage.getItem(LOG_KEY));
+						if (Array.isArray(raw)) log = raw;
+					} catch (e) {}
+					log.unshift({ at: Date.now(), chat: String(chat || '').slice(0, 80), status: String(status || '') });
+					localStorage.setItem(LOG_KEY, JSON.stringify(log.slice(0, LOG_MAX)));
+				} catch (e) {}
+			}
+			// Transition-only busy report (like the scheduler's): armed tabs
+			// must not hibernate, or their timers die with the auto-reply.
+			function recountAfkBusy() {
+				var on = afkArmed();
+				if (on !== busyOn) {
+					busyOn = on;
+					if (window.__waReportBusy) window.__waReportBusy('scheduled', on);
+				}
+			}
+			function afkUid() {
+				return 'a' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
+			}
+			// Per-chat cooldown map, pruned to 24h and 100 entries so a
+			// long-running account cannot grow it without bound.
+			function loadCooldowns() {
+				var map = {};
+				try {
+					var raw = JSON.parse(localStorage.getItem(LAST_KEY));
+					if (raw && typeof raw === 'object') map = raw;
+				} catch (e) {}
+				var cutoff = Date.now() - 24 * 3600 * 1000;
+				var out = {};
+				var n = 0;
+				for (var k in map) {
+					if (!Object.prototype.hasOwnProperty.call(map, k)) continue;
+					if (!(Number(map[k]) > cutoff)) continue;
+					out[k] = Number(map[k]);
+					if (++n >= 100) break;
+				}
+				return out;
+			}
+			function burstTripped() {
+				var now = Date.now();
+				var stamps = [];
+				try {
+					var raw = JSON.parse(localStorage.getItem(BURST_KEY));
+					if (Array.isArray(raw)) stamps = raw;
+				} catch (e) {}
+				stamps = stamps.filter(function(t) { return (now - Number(t)) < BURST_WINDOW; });
+				try { localStorage.setItem(BURST_KEY, JSON.stringify(stamps.slice(-BURST_CAP * 2))); } catch (e) {}
+				return stamps.length >= BURST_CAP;
+			}
+			function recordAfkCompletion() {
+				var now = Date.now();
+				var stamps = [];
+				try {
+					var raw = JSON.parse(localStorage.getItem(BURST_KEY));
+					if (Array.isArray(raw)) stamps = raw;
+				} catch (e) {}
+				stamps.push(now);
+				stamps = stamps.filter(function(t) { return (now - Number(t)) < BURST_WINDOW; });
+				try { localStorage.setItem(BURST_KEY, JSON.stringify(stamps.slice(-BURST_CAP * 2))); } catch (e) {}
+			}
+			function noteAfkBreaker() {
+				if (breakerToasted) return;
+				breakerToasted = true;
+				pushAfkLog('', 'paused: burst limit, resumes automatically');
+				showFloatingToast('🤖 AFK paused: too many auto-replies — resumes automatically');
+			}
+			function expandAfkVars(text, name) {
+				var now = new Date();
+				return String(text || '')
+					.split('{date}').join(now.toLocaleDateString())
+					.split('{time}').join(now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))
+					.split('{name}').join(String(name || ''));
+			}
+			// Name for a candidate row: the bare chat name without badge
+			// copies. Prefers the titled name span (cell-frame-title >
+			// span[title]), then badge-stripped title text, then a legacy
+			// button title. Pure over (row, btn) so the harness can drive
+			// it with detached fixtures.
+			function afkRowName(row, btn) {
+				var name = '';
+				try {
+					var titleEl = row.querySelector('[data-testid="cell-frame-title"]');
+					if (titleEl) {
+						var named = titleEl.querySelector('span[title]');
+						if (named && named.getAttribute('title')) {
+							name = String(named.getAttribute('title')).replace(/\s+/g, ' ').trim().slice(0, 80);
+						}
+					}
+				} catch (e) {}
+				if (!name) {
+					try {
+						var titleEl2 = row.querySelector('[data-testid="cell-frame-title"]');
+						if (titleEl2) {
+							// The unread badge lives INSIDE the title node in
+							// the new layout — strip badge copies so the key
+							// stays the bare chat name (cooldown + identity
+							// depend on it).
+							var clone = titleEl2.cloneNode(true);
+							var badges = clone.querySelectorAll('[data-testid="icon-unread-count"], [data-testid="unread-pill"], [aria-label*="unread" i], [aria-label*="belum dibaca" i]');
+							for (var b = 0; b < badges.length; b++) {
+								try { if (badges[b].parentNode) badges[b].parentNode.removeChild(badges[b]); } catch (e2b) {}
+							}
+							name = String(clone.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+						}
+					} catch (e2) {}
+				}
+				if (!name && btn) {
+					try { name = (btn.getAttribute('title') || '').trim().slice(0, 80); } catch (e3) {}
+				}
+				return name;
+			}
+			window.__waAfkRowName = afkRowName;
+			// Chat rows carrying an unread badge. Two list generations are
+			// supported: the legacy rows (button[title] + unread-pill) and
+			// the current cell-frame rows (gridcell[tabindex] to click,
+			// icon-unread-count badge, titled name span for the name). The
+			// badge alone is never enough — a click target AND a name are
+			// both required, and the name is later verified against the
+			// opened header before anything is typed.
+			function findUnreadCandidates() {
+				var out = [];
+				try {
+					var root = document.getElementById('pane-side') || document.body;
+					if (!root) return out;
+					var rows = root.querySelectorAll('div[role="row"]');
+					for (var i = 0; i < rows.length && out.length < 5; i++) {
+						var row = rows[i];
+						var unread = null;
+						try {
+							unread = row.querySelector('[data-testid="icon-unread-count"], [data-testid="unread-pill"], [aria-label*="unread" i], [aria-label*="belum dibaca" i]');
+						} catch (e) {}
+						if (!unread) continue;
+						var btn = row.querySelector('[role="button"][title]') ||
+							row.querySelector('div[role="gridcell"]') ||
+							row.querySelector('[role="button"], [tabindex="0"]');
+						if (!btn) continue;
+						var name = afkRowName(row, btn);
+						if (!name) continue;
+						out.push({ key: name, el: btn });
+					}
+				} catch (e) {}
+				return out;
+			}
+			// Opened-chat name for the identity gate. The current header
+			// carries a single [title] ("Profile details" avatar button)
+			// and glues the bare name to icon ligatures + presence
+			// ("kopikilo.idic-video…online"). Layer 1 reads a stripped
+			// clone: only icon buttons, icon glyphs and titled blocks go
+			// — role=button containers stay because the name itself may
+			// live in one. Layer 2 (headerContainsKey below) covers a
+			// stripped-away name via the raw text. An empty strip falls
+			// back to the first titled node (legacy layout).
+			function headerTitle() {
+				try {
+					var main = document.getElementById('main');
+					if (!main) return '';
+					var header = main.querySelector('header');
+					if (!header) return '';
+					try {
+						var clone = header.cloneNode(true);
+						var drop = clone.querySelectorAll('button, [data-icon], [title]');
+						for (var d = 0; d < drop.length; d++) {
+							try { if (drop[d].parentNode) drop[d].parentNode.removeChild(drop[d]); } catch (e2) {}
+						}
+						var txt = String(clone.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+						if (txt) return txt;
+					} catch (e3) {}
+					var t = header.querySelector('[title]');
+					return t ? String(t.getAttribute('title') || '').trim().slice(0, 80) : '';
+				} catch (e) {
+					return '';
+				}
+			}
+			// Layer 2: does the open conversation's raw header text
+			// contain the candidate key verbatim? Short keys (<4) are
+			// refused — a 2-letter key could hide inside icon ligatures.
+			function headerContainsKey(key) {
+				try {
+					key = String(key || '').trim();
+					if (key.length < 4) return false;
+					var main = document.getElementById('main');
+					var header = main && main.querySelector('header');
+					if (!header) return false;
+					var txt = String(header.textContent || '').replace(/\s+/g, ' ').trim();
+					return txt.indexOf(key) !== -1;
+				} catch (e) { return false; }
+			}
+			window.__waHeaderContainsKey = headerContainsKey;
+			// Best-effort group detection. False positives only SKIP a
+			// reply (safe); a miss still replies once per cooldown.
+			function looksLikeGroup() {
+				try {
+					var main = document.getElementById('main');
+					if (!main) return false;
+					if (main.querySelector('header [data-testid="group-name"]')) return true;
+					var header = main.querySelector('header');
+					var txt = header ? String(header.innerText || header.textContent || '') : '';
+					if (/\b(participants?|peserta)\b/i.test(txt)) return true;
+					var lines = txt.split('\n');
+					for (var i = 1; i < lines.length && i < 4; i++) {
+						var ln = (lines[i] || '').trim();
+						if (ln.indexOf(',') !== -1 && !/^\+?[\d(]/.test(ln)) return true;
+					}
+				} catch (e) {}
+				return false;
+			}
+			// Row title vs opened header: exact match, or one contains the
+			// other (WA occasionally decorates one side). Anything else is
+			// a different chat — never type into it.
+			function namesMatch(a, b) {
+				a = String(a || '').replace(/\s+/g, ' ').trim();
+				b = String(b || '').replace(/\s+/g, ' ').trim();
+				if (!a || !b || a.length < 2 || b.length < 2) return false;
+				if (a === b) return true;
+				return a.indexOf(b) !== -1 || b.indexOf(a) !== -1;
+			}
+			function findAfkComposer() {
+				// Footer-first, same as the scheduler: the header's
+				// search-in-conversation box is contenteditable too and
+				// would swallow the reply.
+				var main = document.getElementById('main');
+				if (!main) return null;
+				var footer = main.querySelector('footer');
+				if (footer) {
+					var inFooter = footer.querySelector('div[contenteditable="true"][role="textbox"]') ||
+						footer.querySelector('div[contenteditable="true"]') ||
+						footer.querySelector('textarea');
+					if (inFooter) return inFooter;
+				}
+				return main.querySelector('div[contenteditable="true"][role="textbox"]') ||
+					main.querySelector('div[contenteditable="true"]') ||
+					main.querySelector('textarea');
+			}
+			// Pure: why did the open-chat check find no reply box? When the
+			// header already shows the target chat, the view itself offers
+			// no composer (channel/broadcast/announcement) — skipping is
+			// correct. Otherwise the list click never navigated anywhere.
+			function afkNoComposerReason(opened, key) {
+				if (namesMatch(opened, key)) return 'skipped (channel, no reply box)';
+				return 'failed (no composer)';
+			}
+			window.__waAfkNoComposerReason = afkNoComposerReason;
+			// Row activation for the current list DOM: a lone synthetic
+			// click on the gridcell does not always navigate (verified in
+			// the field — personal chats stayed closed), so send the full
+			// press sequence plus keyboard activation, whatever the list
+			// handlers listen for. Synthetic input only ever reaches the
+			// row: our own send guards key off #main targets and real
+			// send buttons, which this never touches.
+			function activateAfkRow(el) {
+				if (!el) return;
+				try { if (el.focus) el.focus(); } catch (e) {}
+				try {
+					var opts = { bubbles: true, cancelable: true, view: window };
+					if (window.MouseEvent) {
+						el.dispatchEvent(new MouseEvent('pointerdown', opts));
+						el.dispatchEvent(new MouseEvent('mousedown', opts));
+						el.dispatchEvent(new MouseEvent('mouseup', opts));
+					}
+					el.click();
+				} catch (e2) {
+					try { el.click(); } catch (e3) {}
+				}
+				try {
+					if (window.KeyboardEvent) {
+						el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+					}
+				} catch (e4) {}
+			}
+			window.__waActivateAfkRow = activateAfkRow;
+			// Trusted click through the CDP bridge: dispatches real
+			// (isTrusted) mousePressed/mouseReleased at the row's center so
+			// the list navigates where synthetic presses are ignored.
+			// Fire-and-forget — the poll loop observes the result.
+			// No-ops without the Windows bridge. Never runs while the
+			// Settings panel is open (the tick defers first), so there is
+			// nothing to hide from the hit-test. The expected chat key
+			// travels along: at dispatch time the row's name is re-read
+			// and the press is dropped when the list has re-sorted under
+			// us (a neighbour row would otherwise open — the identity
+			// gate would refuse it, but never opening is cleaner).
+			function afkTrustedClick(el, key) {
+				try {
+					if (typeof window.__waCdp !== 'function') return false;
+					if (typeof window.waCdpNative !== 'function') return false;
+					if (!el || !el.getBoundingClientRect) return false;
+					try { if (el.scrollIntoView) el.scrollIntoView({ block: 'nearest' }); } catch (e0) {}
+					// The list may smooth-scroll after scrollIntoView (or
+					// recycle the row node): re-measure at dispatch time and
+					// re-validate badge AND name, so the press cannot land
+					// on a recycled stranger row.
+					setTimeout(function() {
+						try {
+							if (!el.isConnected) return;
+							var rowNow = el.closest ? el.closest('div[role="row"]') : null;
+							if (rowNow) {
+								var still = null;
+								try {
+									still = rowNow.querySelector('[data-testid="icon-unread-count"], [data-testid="unread-pill"], [aria-label*="unread" i], [aria-label*="belum dibaca" i]');
+								} catch (eb) {}
+								if (!still) return;
+								if (key && window.__waAfkRowName) {
+									var stillKey = '';
+									try { stillKey = window.__waAfkRowName(rowNow, el); } catch (en) {}
+									if (!stillKey || stillKey !== key) return;
+								}
+							}
+							var r = el.getBoundingClientRect();
+							if (!r || !(r.width > 0) || !(r.height > 0)) return;
+							var x = Math.round(r.left + r.width / 2);
+							var y = Math.round(r.top + r.height / 2);
+							if (!(x > 0 && y > 0)) return;
+							var press = JSON.stringify({ type: 'mousePressed', x: x, y: y, button: 'left', clickCount: 1 });
+							var release = JSON.stringify({ type: 'mouseReleased', x: x, y: y, button: 'left', clickCount: 1 });
+							window.__waCdp('Input.dispatchMouseEvent', press, function() {
+								window.__waCdp('Input.dispatchMouseEvent', release, function() {});
+							});
+						} catch (e) {}
+					}, 350);
+					return true;
+				} catch (e) { return false; }
+			}
+			window.__waAfkTrustedClick = afkTrustedClick;
+			// Manual send ends AFK mode (capture phase, guarded so the
+			// routine's own send and a queued scheduler send never count;
+			// an empty composer is a no-op keypress, not a sent message).
+			document.addEventListener('keydown', function(e) {
+				if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
+				if (sending || !afkArmed()) return;
+				if (window.__schedInFlight && window.__schedInFlight()) return;
+				var t = e.target;
+				if (!t || !t.closest || !t.closest('#main')) return;
+				var txt = '';
+				try { txt = ((t.tagName === 'TEXTAREA' ? t.value : t.textContent) || '').trim(); } catch (e2) {}
+				if (!txt) return;
+				endAfkByUser();
+			}, true);
+			document.addEventListener('click', function(e) {
+				if (sending || !afkArmed()) return;
+				// The scheduler's OWN send click (other IIFE) must not be
+				// mistaken for the user typing — that silently killed AFK
+				// mode whenever a scheduled send fired while AFK was armed.
+				if (window.__schedInFlight && window.__schedInFlight()) return;
+				var t = e.target;
+				if (!t || !t.closest) return;
+				var btn = t.closest('button');
+				if (!btn) return;
+				if (btn.querySelector('[data-icon="send"]') || btn.getAttribute('data-tab') === 'send') {
+					endAfkByUser();
+				}
+			}, true);
+			function endAfkByUser() {
+				var c = loadAfkCfg();
+				if (!c.enabled) return;
+				c.enabled = false;
+				saveAfkCfg(c);
+				recountAfkBusy();
+				pushAfkLog('', 'off (you sent a message)');
+				showFloatingToast('🤖 AFK auto-reply turned off — you sent a message');
+			}
+			function startAfkReply(cand, cfg) {
+				var now = Date.now();
+				// Claim BEFORE clicking: stamp the cooldown and an in-flight
+				// marker so a reload or double tick can never start a second
+				// attempt for the same chat. Failures do not retry within
+				// the cooldown either — a broken DOM must not loop.
+				var map = loadCooldowns();
+				map[cand.key] = now;
+				try { localStorage.setItem(LAST_KEY, JSON.stringify(map)); } catch (e) { return; }
+				try { localStorage.setItem(INFLIGHT_KEY, JSON.stringify({ key: cand.key, at: now })); } catch (e) {}
+				sending = true;
+				recountAfkBusy();
+				var attemptId = afkUid().slice(-4);
+				var pollDone = false;
+				var sendDone = false;
+				var verifyDone = false;
+				var finished = false;
+				var waited = 0;
+				var triedFallback = false;
+				activateAfkRow(cand.el);
+				afkTrustedClick(cand.el, cand.key);
+				var timer = setInterval(function() {
+					if (pollDone) return;
+					waited += 400;
+					var composer = findAfkComposer();
+					if (!composer && waited < 9000) {
+						// Second-chance activation halfway through: the row
+						// itself, in case the cell swallowed the first press.
+						if (!triedFallback && waited >= 2400) {
+							triedFallback = true;
+							try {
+								var rowEl = (cand.el.closest) ? cand.el.closest('div[role="row"]') : null;
+								if (rowEl && rowEl !== cand.el) {
+									activateAfkRow(rowEl);
+									afkTrustedClick(rowEl, cand.key);
+								}
+							} catch (e2) {}
+						}
+						return;
+					}
+					pollDone = true;
+					clearInterval(timer);
+					if (!composer) {
+						// Name the failure: channel view vs dead click.
+						finishAfkReply(afkNoComposerReason(headerTitle(), cand.key));
+						return;
+					}
+					// Identity gate: only the chat we clicked may receive
+					// the reply. Unverified or mismatched header aborts.
+					// Two layers: parsed name match, else raw-text contains
+					// (the stripped parse may drop a button-wrapped name).
+					var opened = headerTitle();
+					if (!opened) {
+						finishAfkReply('failed (unverified)');
+						return;
+					}
+					var nameOk = namesMatch(opened, cand.key);
+					if (!nameOk && !headerContainsKey(cand.key)) {
+						// Name the witness: the opened header text tells
+						// apart a wrongly-opened chat from a misparsed one.
+						finishAfkReply('failed (chat mismatch: saw "' + String(opened || '').slice(0, 40) + '")');
+						return;
+					}
+					// {name} expands from the verified identity: the parsed
+					// header when it matched, else the candidate key itself.
+					var displayName = nameOk ? opened : cand.key;
+					if (!cfg.groups && looksLikeGroup()) {
+						finishAfkReply('skipped (group)');
+						return;
+					}
+					// Same choke-point as the scheduler, right before we
+					// type: owner kill (no leftover text in the composer),
+					// send gap, per-page budget. Trips emergency on repeat.
+					var guard = window.__waGuardSend ? window.__waGuardSend('afk') : { ok: true };
+					if (!guard.ok) {
+						finishAfkReply(guard.why === 'pace' || guard.why === 'cap' ?
+							('blocked (send ' + guard.why + ')') : 'cancelled (emergency stop)');
+						return;
+					}
+					var msg = expandAfkVars(cfg.text, displayName);
+					// Insert may travel the trusted CDP channel
+					// (asynchronous): the send stage continues from
+					// beginAfkSend inside the insert callback.
+					function beginAfkSend(insertPath) {
+						if (!insertPath) {
+							finishAfkReply('failed (insert)');
+							return;
+						}
+						if (sendDone) return;
+						sendDone = true;
+						// Same send stage as the scheduler: wait out the
+						// async MIC→SEND re-render, Enter as fallback, then
+						// keep polling for a late button.
+						window.__waSendWithWait(composer, 'afk');
+						var checks = 0;
+						var verify = setInterval(function() {
+							if (verifyDone) return;
+							checks++;
+							var txt = '';
+							try {
+								txt = ((composer.tagName === 'TEXTAREA' ? composer.value : composer.textContent) || '').trim();
+							} catch (e) {}
+						if (txt === '' || checks >= 32) {
+							verifyDone = true;
+							clearInterval(verify);
+							finishAfkReply(txt === '' ? 'sent' : 'failed (not delivered)');
+							}
+						}, 250);
+					}
+					window.__waInsertAsync(composer, msg, function(insertPath) {
+						// The async gap lets the owner kill switch land
+						// mid-flight: never send after a kill.
+						var killed = false;
+						try { killed = localStorage.getItem('wa_desk_sched_killed') === '1'; } catch (e) {}
+						if (killed || finished) {
+							finishAfkReply('cancelled (emergency stop)');
+							return;
+						}
+						beginAfkSend(insertPath);
+					});
+				}, 400);
+				function finishAfkReply(status) {
+					if (finished) return;
+					finished = true;
+					try { localStorage.removeItem(INFLIGHT_KEY); } catch (e) {}
+					if (status === 'sent') recordAfkCompletion();
+					sending = false;
+					recountAfkBusy();
+					pushAfkLog(cand.key, status + ' [' + bootId + '/' + attemptId + ']');
+					if (status === 'sent') showFloatingToast('🤖 AFK auto-replied to ' + cand.key);
+				}
+			}
+			function afkTick() {
+				if (sending || !afkArmed()) return;
+				// Never yank the open conversation while the user is
+				// configuring or actively using the app: defer the scan,
+				// don't disarm. (The status line says exactly this.)
+				try {
+					if (document.getElementById('wa-settings-overlay')) return;
+					if (Date.now() - lastUserActivityAt < 30000) return;
+				} catch (e) {}
+				// The scheduler owns the composer whenever a payload is
+				// queued: never two senders at once.
+				try { if (localStorage.getItem(SCHED_PENDING_KEY)) return; } catch (e) {}
+				if (burstTripped()) {
+					noteAfkBreaker();
+					return;
+				}
+				var cands = findUnreadCandidates();
+				if (!cands.length) return;
+				var cfg = loadAfkCfg();
+				var map = loadCooldowns();
+				var now = Date.now();
+				var cdMs = cfg.cooldownMin * 60000;
+				for (var i = 0; i < cands.length; i++) {
+					var lastAt = Number(map[cands[i].key]) || 0;
+					if (now - lastAt < cdMs) continue;
+					// Allowlist short-circuit (before any click): not ours,
+					// claim the cooldown and note it once per window so the
+					// log explains the silence instead of hiding it.
+					if (!afkAllowed(cfg, cands[i].key)) {
+						map[cands[i].key] = now;
+						try { localStorage.setItem(LAST_KEY, JSON.stringify(map)); } catch (e2) {}
+						pushAfkLog(cands[i].key, 'skipped (not in list)');
+						continue;
+					}
+					startAfkReply(cands[i], cfg);
+					return;
+				}
+			}
+			// Deterministic entry point for the harness: one scan exactly
+			// like the interval performs.
+			window.__afkTick = afkTick;
+			// Live diagnosis for the Settings status line (and the
+			// harness): why the tick is idle right now. Silent gates —
+			// cooldown, an already-read chat, a stuck scheduler payload —
+			// otherwise leave zero trace and look "broken".
+			window.__waAfkStatus = function() {
+				var c = loadAfkCfg();
+				var killed = false;
+				try { killed = localStorage.getItem(KILLED_KEY) === '1'; } catch (e) {}
+				var now = Date.now();
+				var inWin = afkInWindow(c, now);
+				var schedPending = false;
+				try { schedPending = !!localStorage.getItem(SCHED_PENDING_KEY); } catch (e) {}
+				var settingsOpen = false;
+				var userActive = false;
+				try {
+					settingsOpen = !!document.getElementById('wa-settings-overlay');
+					userActive = (now - lastUserActivityAt) < 30000;
+				} catch (e2) {}
+				var st = {
+					armed: afkArmed(), enabled: !!c.enabled, killed: killed,
+					hasText: !!c.text, useWindow: !!c.useWindow,
+					startMin: c.startMin, endMin: c.endMin, inWindow: inWin,
+					sending: sending, burst: burstTripped(),
+					schedPending: schedPending,
+					settingsOpen: settingsOpen, userActive: userActive,
+					candidates: 0, cooldownSkips: 0, reason: '',
+					allowOnly: !!c.allowOnly,
+					allowedTotal: Array.isArray(c.allowed) ? c.allowed.length : 0,
+					allowedHits: 0
+				};
+				if (st.armed) {
+					var cands = findUnreadCandidates();
+					st.candidates = cands.length;
+					var map = loadCooldowns();
+					var cdMs = (Number(c.cooldownMin) || 10) * 60000;
+					for (var i = 0; i < cands.length; i++) {
+						var lastAt = Number(map[cands[i].key]) || 0;
+						if (now - lastAt < cdMs) st.cooldownSkips++;
+						try { if (afkAllowed(c, cands[i].key)) st.allowedHits++; } catch (e3) {}
+					}
+				}
+				var hm = window.__waAfkMinsToHM;
+				var span = function(m) { try { return hm(m); } catch (e) { return String(m); } };
+				if (!c.enabled) st.reason = 'off — enable AFK auto-reply';
+				else if (!c.text) st.reason = 'off — reply message is empty';
+				else if (killed) st.reason = 'halted — emergency stop is on';
+				else if (!inWin) st.reason = 'idle — outside reply hours (' +
+					span(c.startMin) + '–' + span(c.endMin) + ')';
+				else if (sending) st.reason = 'working — a reply is being sent';
+				else if (st.settingsOpen) st.reason = 'paused — settings panel is open (close it to resume)';
+				else if (st.userActive) st.reason = 'paused — you were just active (resumes when idle)';
+				else if (schedPending) st.reason = 'waiting — a scheduled send owns the composer';
+				else if (st.burst) st.reason = 'paused — burst limit, resumes automatically';
+				else if (st.allowOnly && st.candidates > 0 && st.allowedHits === 0) st.reason = 'idle — unread chats are not in the reply list (' +
+					st.allowedTotal + ' listed)';
+				else if (!st.candidates) st.reason = 'idle — no unread chats right now';
+				else if (st.cooldownSkips >= st.candidates) st.reason = 'waiting — replied recently, cooldown per chat (' +
+					(Number(c.cooldownMin) || 10) + ' min)';
+				else st.reason = 'armed — will reply to the next unread chat';
+				return st;
+			};
+			// True while an AFK reply attempt owns the composer; the
+			// scheduler tick yields to this instead of navigating away
+			// mid-attempt (and possibly killing it).
+			window.__afkInFlight = function() { return sending; };
+			// Chat-list probe for the "Diagnose scan" button: attribute
+			// inventory only (titles/testids/aria-labels, truncated — no
+			// message text), so a changed WhatsApp DOM shows up as counts
+			// instead of a silent "no unread chats".
+			window.__waAfkProbe = function() {
+				var out = {
+					probe: 'afk5',
+					paneSide: false, rows: 0, pills: 0, ariaUnread: 0,
+					ariaID: 0, titledButtons: 0, candidates: [],
+					docTitle: '', samples: [], unreadEls: [], rowDetail: [],
+					mainFound: false, mainFooter: false, mainEditables: 0,
+					mainHeader: '', mainHeaderAll: [], mainHeaderText: '',
+					mainHeaderHTML: '',
+					appShell: [], appDeep: [], docFooters: 0, docEditables: 0,
+					titleHTML: ''
+				};
+				// App skeleton: top-level layout children (structure only)
+				// so a renamed conversation pane shows up. Document-wide
+				// footer/editable counts tell whether ANY composer exists.
+				try {
+					var app = document.getElementById('app');
+					if (app) {
+						var kids = app.children;
+						for (var k = 0; k < kids.length && k < 10; k++) {
+							var kd = (kids[k].tagName || '?').toLowerCase();
+							try {
+								if (kids[k].id) kd += '#' + kids[k].id;
+								if (kids[k].getAttribute('role')) kd += '[role=' + kids[k].getAttribute('role') + ']';
+							} catch (ek) {}
+							out.appShell.push(kd);
+						}
+					}
+					out.docFooters = document.querySelectorAll('footer').length;
+					out.docEditables = document.querySelectorAll('div[contenteditable="true"], textarea').length;
+					// One level deeper than appShell: where the conversation
+					// pane mounts when a chat opens.
+					try {
+						var kid0 = app && app.children && app.children[0];
+						if (kid0 && kid0.children) {
+							for (var g = 0; g < kid0.children.length && g < 10; g++) {
+								var gd = (kid0.children[g].tagName || '?').toLowerCase();
+								try {
+									if (kid0.children[g].id) gd += '#' + kid0.children[g].id;
+									if (kid0.children[g].getAttribute('role')) gd += '[role=' + kid0.children[g].getAttribute('role') + ']';
+								} catch (eg) {}
+								out.appDeep.push(gd);
+							}
+						}
+					} catch (eg2) {}
+				} catch (esk) {}
+				try { out.docTitle = String(document.title || '').slice(0, 60); } catch (e) {}
+				try {
+					var root = document.getElementById('pane-side');
+					out.paneSide = !!root;
+					if (!root) root = document.body;
+					if (!root) return out;
+					var rows = root.querySelectorAll('div[role="row"]');
+					out.rows = rows.length;
+					out.pills = root.querySelectorAll('[data-testid="unread-pill"]').length;
+					try { out.ariaUnread = root.querySelectorAll('[aria-label*="unread" i]').length; } catch (e) {}
+					try { out.ariaID = root.querySelectorAll('[aria-label*="belum dibaca" i]').length; } catch (e) {}
+					out.titledButtons = root.querySelectorAll('[role="button"][title]').length;
+					var cands = findUnreadCandidates();
+					for (var i = 0; i < cands.length; i++) out.candidates.push(cands[i].key);
+					// Deep section: every aria-unread badge (capped) with its
+					// tag/testid/label, its row index, and a short ancestor
+					// path — tells us what the unread marker looks like now.
+					try {
+						var un = root.querySelectorAll('[aria-label*="unread" i]');
+						var allRows = root.querySelectorAll('div[role="row"]');
+						var rowIdxOf = function(el) {
+							for (var r = 0; r < allRows.length; r++) {
+								try { if (allRows[r].contains(el)) return r; } catch (e) {}
+							}
+							return -1;
+						};
+						for (var u = 0; u < un.length && u < 8; u++) {
+							var el = un[u];
+							var path = [];
+							try {
+								var p = el;
+								for (var d = 0; d < 3 && p && p !== root; d++) {
+									var bits = (p.tagName || '?').toLowerCase();
+									try {
+										if (p.getAttribute('role')) bits += '[role=' + p.getAttribute('role') + ']';
+										if (p.getAttribute('data-testid')) bits += '[tid=' + String(p.getAttribute('data-testid')).slice(0, 32) + ']';
+									} catch (e2) {}
+									path.push(bits);
+									p = p.parentElement;
+								}
+							} catch (e3) {}
+							var desc = { tag: '', testid: '', aria: '', row: -1, path: path };
+							try {
+								desc.tag = (el.tagName || '').toLowerCase();
+								desc.testid = String(el.getAttribute('data-testid') || '').slice(0, 40);
+								desc.aria = String(el.getAttribute('aria-label') || '').slice(0, 60);
+								desc.row = rowIdxOf(el);
+							} catch (e4) {}
+							out.unreadEls.push(desc);
+						}
+					} catch (e5) {}
+					// Deep section: per-row clickable inventory + name
+					// container presence (text length only, never content).
+					try {
+						var rowList = root.querySelectorAll('div[role="row"]');
+						for (var j2 = 0; j2 < rowList.length && j2 < 3; j2++) {
+							var row = rowList[j2];
+							var rinfo = { rowAttrs: '', clickables: [], nameLen: -1, titleTidCount: 0 };
+							try {
+								var ra = [];
+								if (row.getAttribute('tabindex') !== null) ra.push('tabindex=' + row.getAttribute('tabindex'));
+								if (row.getAttribute('aria-selected') !== null) ra.push('aria-selected=' + row.getAttribute('aria-selected'));
+								if (row.getAttribute('aria-label')) ra.push('aria-label=' + String(row.getAttribute('aria-label')).slice(0, 40));
+								rinfo.rowAttrs = ra.join(' ') || '(none)';
+							} catch (e6) {}
+							try {
+								var cl = row.querySelectorAll('button, a, [role="button"], [tabindex], [data-action]');
+								for (var c2 = 0; c2 < cl.length && c2 < 6; c2++) {
+									var cb = [];
+									try {
+										cb.push((cl[c2].tagName || '?').toLowerCase());
+										if (cl[c2].getAttribute('role')) cb.push('role=' + cl[c2].getAttribute('role'));
+										if (cl[c2].getAttribute('tabindex') !== null) cb.push('tabindex=' + cl[c2].getAttribute('tabindex'));
+										if (cl[c2].getAttribute('title')) cb.push('title=' + String(cl[c2].getAttribute('title')).slice(0, 30));
+										if (cl[c2].getAttribute('aria-label')) cb.push('aria=' + String(cl[c2].getAttribute('aria-label')).slice(0, 30));
+										if (cl[c2].getAttribute('data-testid')) cb.push('tid=' + String(cl[c2].getAttribute('data-testid')).slice(0, 30));
+									} catch (e7) {}
+									rinfo.clickables.push(cb.join(' '));
+								}
+							} catch (e8) {}
+							try {
+								var nm = row.querySelector('[data-testid="cell-frame-title"]');
+								if (nm) {
+									rinfo.nameLen = String(nm.textContent || '').trim().length;
+									rinfo.titleTidCount = row.querySelectorAll('[data-testid="cell-frame-title"]').length;
+								}
+							} catch (e9) {}
+							out.rowDetail.push(rinfo);
+						}
+					} catch (e10) {}
+				// Raw title markup of the first unread row (truncated):
+				// shows exactly where the badge text hides so the name
+				// extractor can strip it precisely.
+				try {
+					var urows = root.querySelectorAll('div[role="row"]');
+					for (var h = 0; h < urows.length; h++) {
+						try {
+							if (!urows[h].querySelector('[data-testid="icon-unread-count"]')) continue;
+							var th = urows[h].querySelector('[data-testid="cell-frame-title"]');
+							if (th) out.titleHTML = String(th.innerHTML || '').slice(0, 400);
+							break;
+						} catch (eh) {}
+					}
+				} catch (e11b) {}
+				// Main panel state: distinguishes "click opened a view with
+				// no reply box" (channel/broadcast) from "click navigated
+				// nowhere" — both surface as no-composer otherwise.
+				try {
+					var main = document.getElementById('main');
+					out.mainFound = !!main;
+					if (main) {
+						out.mainFooter = !!main.querySelector('footer');
+						out.mainEditables = main.querySelectorAll('div[contenteditable="true"], textarea').length;
+						var mh = main.querySelector('header [title]');
+						if (mh) out.mainHeader = String(mh.getAttribute('title') || '').slice(0, 40);
+						// Every titled node in the conversation header (the
+						// first [title] is "Profile details" now — the real
+						// chat name lives elsewhere) plus the header's own
+						// text sample.
+						try {
+							var mhh = main.querySelectorAll('header [title]');
+							for (var hi = 0; hi < mhh.length && hi < 8; hi++) {
+								try {
+									out.mainHeaderAll.push((mhh[hi].tagName || '?').toLowerCase() +
+										'[title="' + String(mhh[hi].getAttribute('title')).slice(0, 40) + '"]');
+								} catch (ehh) {}
+							}
+						} catch (eh2) {}
+						try {
+							var mhdr = main.querySelector('header');
+							if (mhdr) {
+								out.mainHeaderText = String(mhdr.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+								out.mainHeaderHTML = String(mhdr.innerHTML || '').slice(0, 600);
+							}
+						} catch (eh3) {}
+					}
+				} catch (e11) {}
+					for (var j = 0; j < rows.length && j < 3; j++) {
+						var btns = rows[j].querySelectorAll('[role="button"]');
+						var inv = [];
+						for (var k = 0; k < btns.length && k < 4; k++) {
+							var names = [];
+							try {
+								var at = btns[k].attributes;
+								for (var a = 0; a < at.length; a++) {
+									var n = at[a].name;
+									if (n === 'title' || n === 'aria-label' || n.indexOf('data-testid') === 0) {
+										names.push(n + '=' + String(at[a].value).slice(0, 40));
+									} else {
+										names.push(n);
+									}
+								}
+							} catch (e2) {}
+							inv.push('button[' + names.join(' ') + ']');
+						}
+						var tids = [];
+						try {
+							var marked = rows[j].querySelectorAll('[data-testid]');
+							for (var t = 0; t < marked.length && t < 6; t++) {
+								tids.push(String(marked[t].getAttribute('data-testid')).slice(0, 40));
+							}
+						} catch (e3) {}
+						out.samples.push({ buttons: inv, testids: tids });
+					}
+				} catch (e) {
+					try { out.error = String((e && e.message) || e).slice(0, 120); } catch (e2) {}
+				}
+				return out;
+			};
+			// Boot recovery: an in-flight marker found at startup means the
+			// previous page died mid-reply. Log it as interrupted once (if
+			// fresh) and clear it; the cooldown was already claimed.
+			try {
+				var infRaw = localStorage.getItem(INFLIGHT_KEY);
+				if (infRaw) {
+					var inf = JSON.parse(infRaw);
+					if (Date.now() - (Number(inf && inf.at) || 0) < 120000) {
+						pushAfkLog(inf && inf.key, 'failed (interrupted)');
+					}
+					localStorage.removeItem(INFLIGHT_KEY);
+				}
+			} catch (e) {}
+			recountAfkBusy();
+			setInterval(afkTick, TICK_MS);
+		})();
+
 		// In-App Auto Updater UI and Handlers
 		(function() {
 			window.showUpdateBanner = function(latestVersion, releaseTitle, downloadUrl) {
@@ -3522,13 +5626,73 @@ func getInitScript(ua string) string {
 				// Opaque from birth: isDark is already known here, so never rely
 				// solely on the later syncModalTheme pass — if badge wiring ever
 				// throws first, the panel must still not leak the page behind it.
-				modal.style.cssText = 'width:520px;max-width:96vw;max-height:90vh;border-radius:10px;box-sizing:border-box;display:flex;flex-direction:column;gap:0;overflow-y:auto;padding:0 22px 18px;box-shadow:0 18px 48px rgba(0,0,0,.32);' +
+				modal.style.cssText = 'width:640px;max-width:96vw;max-height:90vh;border-radius:14px;box-sizing:border-box;display:flex;flex-direction:column;gap:0;overflow-y:auto;padding:0;box-shadow:0 18px 48px rgba(0,0,0,.32);' +
 					'background:' + (isDark ? '#111b21' : '#ffffff') + ';border:1px solid ' + (isDark ? '#2a3942' : '#d1d7db') + ';';
+				// Seed the palette immediately (syncModalTheme repaints it on
+				// every theme change) so the styled sections never compute
+				// against missing custom properties.
+				modal.style.setProperty('--w-bg', isDark ? '#111b21' : '#ffffff');
+				modal.style.setProperty('--w-surface', isDark ? '#18262e' : '#f7f8fa');
+				modal.style.setProperty('--w-border', isDark ? '#2a3942' : '#d1d7db');
+				modal.style.setProperty('--w-text', isDark ? '#e9edef' : '#111b21');
+				modal.style.setProperty('--w-muted', isDark ? '#8696a0' : '#667781');
+				modal.style.setProperty('--w-accent', isDark ? '#00a884' : '#008069');
+				modal.style.setProperty('--w-field', isDark ? '#111b21' : '#ffffff');
+				modal.style.setProperty('--w-hover', isDark ? '#1f2f39' : '#eef1f4');
+				modal.style.setProperty('--w-accent-soft', isDark ? 'rgba(0,168,132,.55)' : 'rgba(0,128,105,.5)');
+				modal.style.colorScheme = isDark ? 'dark' : 'light';
 
-				// Header
+				// One stylesheet scoped to this overlay: rounded cards, sticky
+				// search + category pills, switch-style toggles and the light
+				// entrance motion. Every colour flows from the --w-* custom
+				// properties that syncModalTheme repaints, so the page around
+				// the modal is never touched.
+				var panelCss = '' +
+					'#wa-settings-overlay *{box-sizing:border-box}' +
+					'#wa-settings-overlay ::selection{background:rgba(0,168,132,.35);color:#fff}' +
+					'#wa-settings-overlay .wa-modal-card{background:var(--w-surface);border:1px solid var(--w-border);border-radius:12px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;transition:border-color .15s ease}' +
+					'#wa-settings-overlay .wa-modal-card:hover{border-color:var(--w-accent-soft)}' +
+					'#wa-settings-overlay .wa-set-tools{position:sticky;top:0;z-index:2;background:var(--w-bg);padding:12px 22px 0}' +
+					'#wa-settings-searchwrap{position:relative}' +
+					'#wa-settings-searchicon{position:absolute;left:11px;top:50%;transform:translateY(-50%);font-size:12px;opacity:.6;pointer-events:none}' +
+					'#wa-settings-search{width:100%;padding:9px 12px 9px 32px;border-radius:9px;font-size:12.5px}' +
+					'#wa-settings-tabs{display:flex;gap:6px;padding:10px 0 2px;overflow-x:auto;scrollbar-width:none}' +
+					'#wa-settings-tabs::-webkit-scrollbar{display:none}' +
+					'.wa-set-tab{border:1px solid var(--w-border);background:var(--w-surface);color:var(--w-muted);padding:6px 12px;border-radius:999px;font-size:11.5px;font-weight:600;font-family:inherit;cursor:pointer;white-space:nowrap;transition:background .12s,color .12s,border-color .12s}' +
+					'.wa-set-tab:hover{border-color:var(--w-accent-soft);color:var(--w-text)}' +
+					'.wa-set-tab.wa-on{background:var(--w-accent);border-color:var(--w-accent);color:#fff}' +
+					'.wa-set-tab.wa-on:hover{color:#fff}' +
+					'#wa-settings-body{padding:12px 22px 4px;display:flex;flex-direction:column;gap:10px}' +
+					'.wa-set-foot{padding:8px 22px 18px}' +
+					'.wa-set-hidden{display:none!important}' +
+					'#wa-profiles-card{margin:12px 22px 0}' +
+					'#wa-settings-overlay .wa-card-btn{background:var(--w-surface);border:1px solid var(--w-border);color:var(--w-text);font-family:inherit;transition:background .12s,border-color .12s,color .12s}' +
+					'#wa-settings-overlay .wa-card-btn:not(.wa-switch):hover{background:var(--w-hover);border-color:var(--w-accent-soft)}' +
+					'#wa-settings-overlay .wa-switch{position:relative;width:40px;height:22px;min-width:40px;border-radius:11px;padding:0;cursor:pointer;background:rgba(134,150,160,.45);border:1px solid transparent}' +
+					'#wa-settings-overlay .wa-switch::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.35);transition:left .16s ease}' +
+					'#wa-settings-overlay .wa-switch.wa-on{background:var(--w-accent)}' +
+					'#wa-settings-overlay .wa-switch.wa-on::after{left:21px}' +
+					'#wa-settings-overlay .wa-seg{display:flex;gap:2px;background:var(--w-field);border:1px solid var(--w-border);border-radius:8px;padding:2px}' +
+					'#wa-settings-overlay .wa-segbtn{border:none;background:transparent;color:var(--w-muted);font-size:11.5px;font-weight:600;font-family:inherit;padding:5px 11px;border-radius:6px;cursor:pointer;transition:background .12s,color .12s}' +
+					'#wa-settings-overlay .wa-segbtn:hover{color:var(--w-text)}' +
+					'#wa-settings-overlay .wa-segbtn.wa-on{background:var(--w-accent);color:#fff}' +
+					'#wa-settings-overlay input:not([type=checkbox]):not([type=radio]),#wa-settings-overlay select,#wa-settings-overlay textarea{background:var(--w-field)!important;border:1px solid var(--w-border)!important;color:var(--w-text)!important;font-family:inherit}' +
+					'#wa-settings-overlay input:focus,#wa-settings-overlay select:focus,#wa-settings-overlay textarea:focus{border-color:var(--w-accent)!important;outline:none}' +
+					'#wa-settings-overlay input::placeholder,#wa-settings-overlay textarea::placeholder{color:var(--w-muted)!important;opacity:.85}' +
+					'#wa-settings-overlay{animation:waSetFade .14s ease}' +
+					'#wa-settings-container{animation:waSetRise .16s ease}' +
+					'@keyframes waSetFade{from{opacity:0}}' +
+					'@keyframes waSetRise{from{opacity:0;transform:translateY(6px)}}' +
+					'@media (prefers-reduced-motion:reduce){#wa-settings-overlay,#wa-settings-container{animation:none}}';
+				var panelStyle = document.createElement('style');
+				panelStyle.textContent = panelCss;
+				overlay.appendChild(panelStyle);
+
+				// Header — sticky title bar with the close affordance.
 				var header = document.createElement('div');
 				header.id = 'wa-modal-header';
-				header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;border-bottom-width:1px;border-bottom-style:solid;padding:18px 0 14px;margin-bottom:2px;';
+				header.style.cssText = 'position:sticky;top:0;z-index:3;display:flex;align-items:center;justify-content:space-between;padding:14px 22px;border-bottom-width:1px;border-bottom-style:solid;background:' +
+					(isDark ? '#111b21' : '#ffffff') + ';border-bottom-color:' + (isDark ? '#2a3942' : '#d1d7db') + ';';
 				header.innerHTML = '' +
 					'<div style="display:flex;align-items:center;gap:10px;">' +
 					'  <div id="wa-modal-icon-wrap" style="width:10px;height:10px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:#00a884;">' +
@@ -3538,29 +5702,61 @@ func getInitScript(ua string) string {
 					'    <span id="wa-modal-sub" style="font-size:11px;">Application settings · version __WA_APP_VERSION__</span>' +
 					'  </div>' +
 					'</div>' +
-					'<button id="wa-settings-close-x" style="background:transparent;border:none;cursor:pointer;font-size:18px;line-height:1;padding:4px 8px;border-radius:4px;">✕</button>';
+					'<button id="wa-settings-close-x" aria-label="Close settings" style="background:transparent;border:none;cursor:pointer;font-size:18px;line-height:1;padding:4px 8px;border-radius:6px;">✕</button>';
 				modal.appendChild(header);
+
+				// Sticky tool rail: live search over every section, then the
+				// category pills. The Profiles card lands between the header
+				// and this block (insertBefore(header.nextSibling)), so the
+				// active account still leads the panel.
+				var toolsRow = document.createElement('div');
+				toolsRow.id = 'wa-settings-tools';
+				toolsRow.className = 'wa-set-tools';
+				toolsRow.innerHTML = '' +
+					'<div id="wa-settings-searchwrap">' +
+					'  <span id="wa-settings-searchicon">🔍</span>' +
+					'  <input id="wa-settings-search" type="text" placeholder="Search settings — try “zoom”, “scheduler”, “blur”…" autocomplete="off" spellcheck="false" />' +
+					'</div>' +
+					'<div id="wa-settings-tabs" role="tablist">' +
+					'  <button class="wa-set-tab" type="button" data-cat="general" role="tab">⚙️ General</button>' +
+					'  <button class="wa-set-tab" type="button" data-cat="notif" role="tab">🔔 Notifications</button>' +
+					'  <button class="wa-set-tab" type="button" data-cat="privacy" role="tab">🛡️ Privacy</button>' +
+					'  <button class="wa-set-tab" type="button" data-cat="automation" role="tab">🤖 Automation</button>' +
+					'  <button class="wa-set-tab" type="button" data-cat="files" role="tab">📁 Downloads</button>' +
+					'  <button class="wa-set-tab" type="button" data-cat="help" role="tab">❓ Help</button>' +
+					'</div>';
+				modal.appendChild(toolsRow);
+
+				// Section container: every card below carries data-cat (its
+				// pill) and data-name (search synonyms).
+				var setBody = document.createElement('div');
+				setBody.id = 'wa-settings-body';
+				modal.appendChild(setBody);
 
 				// Section 0: Theme Switcher Segmented Control
 				var themeBox = document.createElement('div');
 				themeBox.className = 'wa-modal-card';
-				themeBox.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:14px 0;border-radius:0;border-width:0 0 1px;border-style:solid;gap:16px;';
+				themeBox.setAttribute('data-cat', 'general');
+				themeBox.setAttribute('data-name', 'appearance theme dark light system color');
+				themeBox.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:16px;';
 				themeBox.innerHTML = '' +
 					'<div>' +
 					'  <strong class="wa-text-primary" style="font-size:12.5px;display:block;">Appearance</strong>' +
 					'  <span class="wa-text-muted" style="font-size:11px;">Application interface theme</span>' +
 					'</div>' +
-					'<div style="display:flex;align-items:center;gap:4px;">' +
-					'  <button id="wa-theme-btn-dark" class="wa-theme-btn" style="padding:5px 10px;border-radius:6px;font-size:11.5px;cursor:pointer;border-width:1px;border-style:solid;font-weight:500;">Dark</button>' +
-					'  <button id="wa-theme-btn-light" class="wa-theme-btn" style="padding:5px 10px;border-radius:6px;font-size:11.5px;cursor:pointer;border-width:1px;border-style:solid;font-weight:500;">Light</button>' +
-					'  <button id="wa-theme-btn-system" class="wa-theme-btn" style="padding:5px 10px;border-radius:6px;font-size:11.5px;cursor:pointer;border-width:1px;border-style:solid;font-weight:500;">System</button>' +
+					'<div class="wa-seg" role="group" aria-label="Theme">' +
+					'  <button id="wa-theme-btn-dark" class="wa-segbtn" type="button">Dark</button>' +
+					'  <button id="wa-theme-btn-light" class="wa-segbtn" type="button">Light</button>' +
+					'  <button id="wa-theme-btn-system" class="wa-segbtn" type="button">System</button>' +
 					'</div>';
-				modal.appendChild(themeBox);
+				setBody.appendChild(themeBox);
 
 				// Section 0b: Display Zoom stepper (persisted across restarts).
 				var zoomBox = document.createElement('div');
 				zoomBox.className = 'wa-modal-card';
-				zoomBox.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:14px 0;border-radius:0;border-width:0 0 1px;border-style:solid;gap:16px;';
+				zoomBox.setAttribute('data-cat', 'general');
+				zoomBox.setAttribute('data-name', 'display zoom scale size browser ctrl scroll');
+				zoomBox.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:16px;';
 				zoomBox.innerHTML = '' +
 					'<div>' +
 					'  <strong class="wa-text-primary" style="font-size:12.5px;display:block;">Display zoom</strong>' +
@@ -3572,16 +5768,13 @@ func getInitScript(ua string) string {
 					'  <button id="wa-zoom-in" class="wa-card-btn" style="padding:5px 12px;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;border-width:1px;border-style:solid;" aria-label="Zoom in">+</button>' +
 					'  <button id="wa-zoom-reset" class="wa-card-btn" style="padding:5px 10px;border-radius:6px;font-size:11.5px;cursor:pointer;border-width:1px;border-style:solid;font-weight:500;">Reset</button>' +
 					'</div>';
-				modal.appendChild(zoomBox);
-
-				// Section 1: Quick Interactive Controls (2-Column Grid)
-				var quickGrid = document.createElement('div');
-				quickGrid.style.cssText = 'display:flex;flex-direction:column;';
+				setBody.appendChild(zoomBox);
 
 				// Card 1: Privacy Mode
 				var cardPrivacy = document.createElement('div');
 				cardPrivacy.className = 'wa-modal-card';
-				cardPrivacy.style.cssText = 'border-radius:0;border-width:0 0 1px;border-style:solid;padding:12px 0;display:flex;flex-direction:column;gap:8px;';
+				cardPrivacy.setAttribute('data-cat', 'privacy');
+				cardPrivacy.setAttribute('data-name', 'privacy mode blur hide names auto-lock avatars peek confidential');
 				cardPrivacy.innerHTML = '' +
 					'<div style="display:flex;align-items:center;justify-content:space-between;gap:16px;">' +
 					'  <div>' +
@@ -3593,7 +5786,7 @@ func getInitScript(ua string) string {
 					'  </div>' +
 					'  <div style="display:flex;align-items:center;justify-content:space-between;">' +
 					'    <span class="wa-text-muted" style="font-size:10px;font-family:monospace;">' + (isMac ? 'Cmd' : 'Ctrl') + '+Shift+P</span>' +
-					'    <button id="wa-action-toggle-priv" class="wa-card-btn" style="padding:4px 10px;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;border-width:1px;border-style:solid;">Toggle</button>' +
+					'    <button id="wa-action-toggle-priv" class="wa-card-btn wa-switch" type="button" role="switch" aria-label="Privacy Mode"></button>' +
 					'  </div>' +
 					'</div>' +
 					'<label style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;">' +
@@ -3604,12 +5797,14 @@ func getInitScript(ua string) string {
 					'  <input type="checkbox" id="wa-blur-avatars" style="width:14px;height:14px;accent-color:#00a884;cursor:pointer;margin:0;" />' +
 					'  <span class="wa-text-muted" style="font-size:11px;">Also blur profile photos (hover to peek)</span>' +
 					'</label>';
-				quickGrid.appendChild(cardPrivacy);
+				setBody.appendChild(cardPrivacy);
 
 				// Card 2: Always on Top
 				var cardPin = document.createElement('div');
 				cardPin.className = 'wa-modal-card';
-				cardPin.style.cssText = 'border-radius:0;border-width:0 0 1px;border-style:solid;padding:12px 0;display:flex;align-items:center;justify-content:space-between;gap:16px;';
+				cardPin.setAttribute('data-cat', 'general');
+				cardPin.setAttribute('data-name', 'always on top pin window float');
+				cardPin.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:16px;';
 				cardPin.innerHTML = '' +
 					'<div>' +
 					'  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px;">' +
@@ -3620,14 +5815,16 @@ func getInitScript(ua string) string {
 					'</div>' +
 					'<div style="display:flex;align-items:center;justify-content:space-between;">' +
 					'  <span class="wa-text-muted" style="font-size:10px;font-family:monospace;">' + (isMac ? 'Cmd' : 'Ctrl') + '+Shift+T</span>' +
-					'  <button id="wa-action-toggle-pin" class="wa-card-btn" style="padding:4px 10px;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;border-width:1px;border-style:solid;">Toggle</button>' +
+					'  <button id="wa-action-toggle-pin" class="wa-card-btn wa-switch" type="button" role="switch" aria-label="Always on Top"></button>' +
 					'</div>';
-				quickGrid.appendChild(cardPin);
+				setBody.appendChild(cardPin);
 
 				// Card 3: Audio Mute
 				var cardMute = document.createElement('div');
 				cardMute.className = 'wa-modal-card';
-				cardMute.style.cssText = 'border-radius:0;border-width:0 0 1px;border-style:solid;padding:12px 0;display:flex;align-items:center;justify-content:space-between;gap:16px;';
+				cardMute.setAttribute('data-cat', 'notif');
+				cardMute.setAttribute('data-name', 'audio mute sound notification media');
+				cardMute.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:16px;';
 				cardMute.innerHTML = '' +
 					'<div>' +
 					'  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px;">' +
@@ -3638,14 +5835,16 @@ func getInitScript(ua string) string {
 					'</div>' +
 					'<div style="display:flex;align-items:center;justify-content:space-between;">' +
 					'  <span class="wa-text-muted" style="font-size:10px;font-family:monospace;">' + (isMac ? 'Cmd' : 'Ctrl') + '+Shift+M</span>' +
-					'  <button id="wa-action-toggle-mute" class="wa-card-btn" style="padding:4px 10px;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;border-width:1px;border-style:solid;">Toggle</button>' +
+					'  <button id="wa-action-toggle-mute" class="wa-card-btn wa-switch" type="button" role="switch" aria-label="Notification Audio"></button>' +
 					'</div>';
-				quickGrid.appendChild(cardMute);
+				setBody.appendChild(cardMute);
 
 				// Card 3b: Desktop Notifications
 				var cardNotif = document.createElement('div');
 				cardNotif.className = 'wa-modal-card';
-				cardNotif.style.cssText = 'border-radius:0;border-width:0 0 1px;border-style:solid;padding:12px 0;display:flex;align-items:center;justify-content:space-between;gap:16px;';
+				cardNotif.setAttribute('data-cat', 'notif');
+				cardNotif.setAttribute('data-name', 'desktop notifications alerts os popup');
+				cardNotif.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:16px;';
 				cardNotif.innerHTML = '' +
 					'<div>' +
 					'  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px;">' +
@@ -3655,14 +5854,16 @@ func getInitScript(ua string) string {
 					'  <div class="wa-text-muted" style="font-size:11px;">Show OS-level alerts for new chat messages.</div>' +
 					'</div>' +
 					'<div style="display:flex;align-items:center;justify-content:space-between;">' +
-					'  <button id="wa-action-toggle-notif" class="wa-card-btn" style="padding:4px 10px;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;border-width:1px;border-style:solid;">Toggle</button>' +
+					'  <button id="wa-action-toggle-notif" class="wa-card-btn wa-switch" type="button" role="switch" aria-label="Desktop Notifications"></button>' +
 					'</div>';
-				quickGrid.appendChild(cardNotif);
+				setBody.appendChild(cardNotif);
 
 				// Card 3c: Download Notifications
 				var cardDlNotif = document.createElement('div');
 				cardDlNotif.className = 'wa-modal-card';
-				cardDlNotif.style.cssText = 'border-radius:0;border-width:0 0 1px;border-style:solid;padding:12px 0;display:flex;align-items:center;justify-content:space-between;gap:16px;';
+				cardDlNotif.setAttribute('data-cat', 'notif');
+				cardDlNotif.setAttribute('data-name', 'download notifications popup finished saving');
+				cardDlNotif.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:16px;';
 				cardDlNotif.innerHTML = '' +
 					'<div>' +
 					'  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px;">' +
@@ -3672,14 +5873,16 @@ func getInitScript(ua string) string {
 					'  <div class="wa-text-muted" style="font-size:11px;">Show a popup when a chat file finishes downloading.</div>' +
 					'</div>' +
 					'<div style="display:flex;align-items:center;justify-content:space-between;">' +
-					'  <button id="wa-action-toggle-dlnotif" class="wa-card-btn" style="padding:4px 10px;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;border-width:1px;border-style:solid;">Toggle</button>' +
+					'  <button id="wa-action-toggle-dlnotif" class="wa-card-btn wa-switch" type="button" role="switch" aria-label="Download Notifications"></button>' +
 					'</div>';
-				quickGrid.appendChild(cardDlNotif);
+				setBody.appendChild(cardDlNotif);
 
 				// Card 4: Auto-Start
 				var cardAuto = document.createElement('div');
 				cardAuto.className = 'wa-modal-card';
-				cardAuto.style.cssText = 'border-radius:0;border-width:0 0 1px;border-style:solid;padding:12px 0;display:flex;align-items:center;justify-content:space-between;gap:16px;';
+				cardAuto.setAttribute('data-cat', 'general');
+				cardAuto.setAttribute('data-name', 'launch startup boot login autostart');
+				cardAuto.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:16px;';
 				cardAuto.innerHTML = '' +
 					'<div>' +
 					'  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px;">' +
@@ -3690,16 +5893,18 @@ func getInitScript(ua string) string {
 					'</div>' +
 					'<div style="display:flex;align-items:center;justify-content:space-between;">' +
 					'  <span class="wa-text-muted" style="font-size:10px;font-family:monospace;">' + (isMac ? 'Cmd' : 'Ctrl') + '+Shift+S</span>' +
-					'  <button id="wa-action-toggle-auto" class="wa-card-btn" style="padding:4px 10px;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;border-width:1px;border-style:solid;">Toggle</button>' +
+					'  <button id="wa-action-toggle-auto" class="wa-card-btn wa-switch" type="button" role="switch" aria-label="Launch at Startup"></button>' +
 					'</div>';
-				quickGrid.appendChild(cardAuto);
+				setBody.appendChild(cardAuto);
 
 				// Card 5: Direct Chat (labeled entry: icon-only buttons are
 				// hard to discover, so the modal also opens from here, the
 				// tray menu and Ctrl/Cmd+Shift+C).
 				var cardDirect = document.createElement('div');
 				cardDirect.className = 'wa-modal-card';
-				cardDirect.style.cssText = 'border-radius:0;border-width:0 0 1px;border-style:solid;padding:12px 0;display:flex;align-items:center;justify-content:space-between;gap:16px;';
+				cardDirect.setAttribute('data-cat', 'general');
+				cardDirect.setAttribute('data-name', 'direct chat new number message without contact');
+				cardDirect.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:16px;';
 				cardDirect.innerHTML = '' +
 					'<div>' +
 					'  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px;">' +
@@ -3709,16 +5914,15 @@ func getInitScript(ua string) string {
 					'</div>' +
 					'<div style="display:flex;align-items:center;justify-content:space-between;">' +
 					'  <span class="wa-text-muted" style="font-size:10px;font-family:monospace;">' + (isMac ? 'Cmd' : 'Ctrl') + '+Shift+C</span>' +
-					'  <button id="wa-action-open-directchat" class="wa-card-btn" style="padding:4px 10px;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;border-width:1px;border-style:solid;">Open</button>' +
+					'  <button id="wa-action-open-directchat" class="wa-card-btn" style="padding:6px 14px;border-radius:8px;font-size:11.5px;font-weight:600;cursor:pointer;border-width:1px;border-style:solid;">Open</button>' +
 					'</div>';
-				quickGrid.appendChild(cardDirect);
-
-				modal.appendChild(quickGrid);
+				setBody.appendChild(cardDirect);
 
 				// Section 2: Download Folder Settings
 				var folderSection = document.createElement('div');
 				folderSection.className = 'wa-modal-card';
-				folderSection.style.cssText = 'display:flex;flex-direction:column;gap:8px;border-radius:0;border-width:0 0 1px;border-style:solid;padding:14px 0;';
+				folderSection.setAttribute('data-cat', 'files');
+				folderSection.setAttribute('data-name', 'downloads folder path save location organize monthly subfolders');
 				folderSection.innerHTML = '' +
 					'<div style="display:flex;align-items:center;justify-content:space-between;">' +
 					'  <strong class="wa-text-primary" style="font-size:12.5px;">Downloads folder</strong>' +
@@ -3736,12 +5940,13 @@ func getInitScript(ua string) string {
 					'  <input type="checkbox" id="wa-organize-month" style="width:14px;height:14px;accent-color:#00a884;cursor:pointer;margin:0;" />' +
 					'  <span class="wa-text-muted" style="font-size:11px;">Organize into monthly subfolders (2026-09)</span>' +
 					'</label>';
-				modal.appendChild(folderSection);
+				setBody.appendChild(folderSection);
 
 				// Section 2b: Quick Replies (slash templates for the composer).
 				var qrSection = document.createElement('div');
 				qrSection.className = 'wa-modal-card';
-				qrSection.style.cssText = 'display:flex;flex-direction:column;gap:8px;border-radius:0;border-width:0 0 1px;border-style:solid;padding:14px 0;';
+				qrSection.setAttribute('data-cat', 'automation');
+				qrSection.setAttribute('data-name', 'quick replies template slash trigger variables composer');
 				qrSection.innerHTML = '' +
 					'<div style="display:flex;align-items:center;justify-content:space-between;">' +
 					'  <strong class="wa-text-primary" style="font-size:12.5px;">⚡ Quick Replies</strong>' +
@@ -3753,12 +5958,121 @@ func getInitScript(ua string) string {
 					'  <input id="wa-qr-text" placeholder="Template text..." maxlength="2000" style="flex:1;min-width:0;padding:6px 8px;border-width:1px;border-style:solid;border-radius:6px;font-size:11.5px;background:transparent;color:inherit;outline:none;" />' +
 					'  <button id="wa-qr-add" class="wa-card-btn" style="padding:6px 12px;border-radius:6px;font-size:11.5px;font-weight:600;cursor:pointer;border-width:1px;border-style:solid;flex-shrink:0;">Add</button>' +
 					'</div>';
-				modal.appendChild(qrSection);
+				setBody.appendChild(qrSection);
+
+				// Section 2c: Scheduler (timed messages to phone numbers).
+				var schedSection = document.createElement('div');
+				schedSection.className = 'wa-modal-card';
+				schedSection.setAttribute('data-cat', 'automation');
+				schedSection.setAttribute('data-name', 'scheduler schedule timed message send repeat daily weekly monthly yearly emergency stop');
+				schedSection.innerHTML = '' +
+					'<div style="display:flex;align-items:center;justify-content:space-between;">' +
+					'  <strong class="wa-text-primary" style="font-size:12.5px;">⏰ Scheduler</strong>' +
+					'</div>' +
+					'<div class="wa-text-muted" style="font-size:11px;">Send to a phone number at a set time. Fires while the app runs with this profile loaded — profiles holding schedules stay awake (no hibernate).</div>' +
+					'<label style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;">' +
+					'  <input type="checkbox" id="wa-sched-kill" style="width:14px;height:14px;accent-color:#f15c6d;cursor:pointer;margin:0;" />' +
+					'  <span class="wa-text-muted" style="font-size:11px;">Emergency stop: cancel any pending send and halt all scheduled sending</span>' +
+					'</label>' +
+					'<div id="wa-sched-list" style="display:flex;flex-direction:column;gap:6px;"></div>' +
+					'<div style="display:flex;gap:6px;flex-wrap:wrap;">' +
+					'  <input id="wa-sched-phone" placeholder="number e.g. 62812..." inputmode="tel" style="width:130px;padding:6px 8px;border-width:1px;border-style:solid;border-radius:6px;font-size:11.5px;font-family:monospace;background:transparent;color:inherit;outline:none;" />' +
+					'  <input id="wa-sched-text" placeholder="Message..." maxlength="2000" style="flex:1;min-width:140px;padding:6px 8px;border-width:1px;border-style:solid;border-radius:6px;font-size:11.5px;background:transparent;color:inherit;outline:none;" />' +
+					'</div>' +
+					'<div style="display:flex;gap:6px;align-items:center;">' +
+					'  <input id="wa-sched-whentext" placeholder="or type: 2h, 21:00, tomorrow 08:00, fri 18:00" style="flex:1;min-width:0;padding:6px 8px;border-width:1px;border-style:solid;border-radius:6px;font-size:11.5px;background:transparent;color:inherit;outline:none;" />' +
+					'</div>' +
+					'<div id="wa-sched-whenpreview" class="wa-text-muted" style="font-size:11px;display:none;"></div>' +
+					'<div style="display:flex;gap:6px;align-items:center;">' +
+					'  <input id="wa-sched-when" type="datetime-local" style="flex:1;min-width:0;padding:6px 8px;border-width:1px;border-style:solid;border-radius:6px;font-size:11.5px;background:transparent;color:inherit;outline:none;" />' +
+					'  <select id="wa-sched-repeat" style="padding:6px 8px;border-width:1px;border-style:solid;border-radius:6px;font-size:11.5px;background:transparent;color:inherit;outline:none;flex-shrink:0;">' +
+					'    <option value="once">Once</option>' +
+					'    <option value="daily">Daily</option>' +
+					'    <option value="weekly">Weekly</option>' +
+					'    <option value="monthly">Monthly</option>' +
+					'    <option value="yearly">Yearly</option>' +
+					'  </select>' +
+					'  <select id="wa-sched-repday" title="Weekly: which day" style="display:none;padding:6px 8px;border-width:1px;border-style:solid;border-radius:6px;font-size:11.5px;background:transparent;color:inherit;outline:none;flex-shrink:0;">' +
+					'    <option value="0">Sun</option>' +
+					'    <option value="1">Mon</option>' +
+					'    <option value="2">Tue</option>' +
+					'    <option value="3">Wed</option>' +
+					'    <option value="4">Thu</option>' +
+					'    <option value="5">Fri</option>' +
+					'    <option value="6">Sat</option>' +
+					'  </select>' +
+					'  <button id="wa-sched-add" class="wa-card-btn" style="padding:6px 12px;border-radius:6px;font-size:11.5px;font-weight:600;cursor:pointer;border-width:1px;border-style:solid;flex-shrink:0;">Add</button>' +
+					'</div>' +
+					'<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">' +
+					'  <span class="wa-text-muted" style="font-size:11px;">Recent sends:</span>' +
+					'  <button id="wa-sched-logcopy" class="wa-card-btn" style="padding:2px 8px;border-radius:6px;font-size:10.5px;cursor:pointer;border-width:1px;border-style:solid;">Copy log</button>' +
+					'</div>' +
+					'<div id="wa-sched-log" style="display:flex;flex-direction:column;gap:4px;"></div>';
+				setBody.appendChild(schedSection);
+
+				// Section 2d: AFK auto-reply (one reply per chat while away).
+				var afkSection = document.createElement('div');
+				afkSection.className = 'wa-modal-card';
+				afkSection.setAttribute('data-cat', 'automation');
+				afkSection.setAttribute('data-name', 'afk auto reply away cooldown groups emergency stop hours schedule night');
+				afkSection.innerHTML = '' +
+					'<div style="display:flex;align-items:center;justify-content:space-between;">' +
+					'  <strong class="wa-text-primary" style="font-size:12.5px;">🤖 AFK Auto-Reply</strong>' +
+					'</div>' +
+					'<div class="wa-text-muted" style="font-size:11px;">While armed, a chat with new unread gets one automatic reply per cooldown. Turns itself off the moment you send a message. While armed this profile stays awake.</div>' +
+					'<div id="wa-afk-status" class="wa-text-muted" style="font-size:11px;"></div>' +
+					'<label style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;">' +
+					'  <input type="checkbox" id="wa-afk-enable" style="width:14px;height:14px;accent-color:#00a884;cursor:pointer;margin:0;" />' +
+					'  <span class="wa-text-muted" style="font-size:11px;">Enable AFK auto-reply</span>' +
+					'</label>' +
+					'<textarea id="wa-afk-text" rows="2" maxlength="500" placeholder="Reply message... variables: {date} {time} {name}" style="width:100%;padding:6px 8px;border-width:1px;border-style:solid;border-radius:6px;font-size:11.5px;background:transparent;color:inherit;outline:none;resize:vertical;font-family:inherit;"></textarea>' +
+					'<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">' +
+					'  <span class="wa-text-muted" style="font-size:11px;">Cooldown per chat:</span>' +
+					'  <select id="wa-afk-cooldown" style="padding:5px 8px;border-width:1px;border-style:solid;border-radius:6px;font-size:11.5px;background:transparent;color:inherit;outline:none;">' +
+					'    <option value="5">5 min</option>' +
+					'    <option value="10">10 min</option>' +
+					'    <option value="30">30 min</option>' +
+					'    <option value="60">60 min</option>' +
+					'  </select>' +
+					'  <label style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;">' +
+					'    <input type="checkbox" id="wa-afk-groups" style="width:14px;height:14px;accent-color:#00a884;cursor:pointer;margin:0;" />' +
+					'    <span class="wa-text-muted" style="font-size:11px;">Also reply in groups (best-effort)</span>' +
+					'  </label>' +
+					'</div>' +
+					'<label style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;">' +
+					'  <input type="checkbox" id="wa-afk-window" style="width:14px;height:14px;accent-color:#00a884;cursor:pointer;margin:0;" />' +
+					'  <span class="wa-text-muted" style="font-size:11px;">Only reply between these hours (e.g. overnight 21:00–07:00)</span>' +
+					'</label>' +
+					'<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">' +
+					'  <input id="wa-afk-start" type="time" value="21:00" style="padding:5px 8px;border-width:1px;border-style:solid;border-radius:6px;font-size:11.5px;background:transparent;color:inherit;outline:none;" />' +
+					'  <span class="wa-text-muted" style="font-size:11.5px;">–</span>' +
+					'  <input id="wa-afk-end" type="time" value="07:00" style="padding:5px 8px;border-width:1px;border-style:solid;border-radius:6px;font-size:11.5px;background:transparent;color:inherit;outline:none;" />' +
+					'  <span id="wa-afk-windowhint" class="wa-text-muted" style="font-size:11px;"></span>' +
+					'</div>' +
+					'<label style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;">' +
+					'  <input type="checkbox" id="wa-afk-allowonly" style="width:14px;height:14px;accent-color:#00a884;cursor:pointer;margin:0;" />' +
+					'  <span class="wa-text-muted" style="font-size:11px;">Only reply to the chats/numbers below</span>' +
+					'</label>' +
+					'<textarea id="wa-afk-allow" rows="3" maxlength="2000" placeholder="One per line: name or number — e.g. ibnu, kopikilo.id, 62812345678" style="width:100%;padding:6px 8px;border-width:1px;border-style:solid;border-radius:6px;font-size:11.5px;background:transparent;color:inherit;outline:none;resize:vertical;font-family:inherit;"></textarea>' +
+					'<div class="wa-text-muted" style="font-size:11px;">Names match partially (case-insensitive); numbers match by digits, with or without +62 / leading 0.</div>' +
+					'<label style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;">' +
+					'  <input type="checkbox" id="wa-afk-kill" style="width:14px;height:14px;accent-color:#f15c6d;cursor:pointer;margin:0;" />' +
+					'  <span class="wa-text-muted" style="font-size:11px;">Emergency stop: halt all AFK auto-replies</span>' +
+					'</label>' +
+					'<div class="wa-text-muted" style="font-size:11px;">Recent activity:</div>' +
+					'<div id="wa-afk-log" style="display:flex;flex-direction:column;gap:4px;"></div>' +
+					'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">' +
+					'  <button id="wa-afk-probe" class="wa-card-btn" style="padding:4px 10px;border-radius:6px;font-size:11px;cursor:pointer;border-width:1px;border-style:solid;flex-shrink:0;">Diagnose scan</button>' +
+					'  <span class="wa-text-muted" style="font-size:11px;">No unread found? This shows what the scan sees.</span>' +
+					'</div>' +
+					'<div id="wa-afk-probeout" class="wa-text-muted" style="display:none;font-size:10.5px;font-family:monospace;white-space:pre-wrap;word-break:break-word;user-select:text;-webkit-user-select:text;"></div>';
+				setBody.appendChild(afkSection);
 
 				// Section 3: Maintenance & Update Actions
 				var actionsSection = document.createElement('div');
 				actionsSection.className = 'wa-modal-card';
-				actionsSection.style.cssText = 'display:flex;flex-direction:column;gap:8px;border-radius:0;border-width:0 0 1px;border-style:solid;padding:14px 0;';
+				actionsSection.setAttribute('data-cat', 'help');
+				actionsSection.setAttribute('data-name', 'maintenance update reload cache welcome guide restart');
 				actionsSection.innerHTML = '' +
 					'<strong class="wa-text-primary" style="font-size:12.5px;">Maintenance</strong>' +
 					'<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">' +
@@ -3767,14 +6081,15 @@ func getInitScript(ua string) string {
 					'  <button id="wa-btn-hardref-modal" class="wa-card-btn" style="padding:6px 8px;border-radius:6px;font-size:11.5px;font-weight:500;cursor:pointer;border-width:1px;border-style:solid;text-align:center;">Clear cache</button>' +
 					'  <button id="wa-btn-onboard-modal" class="wa-card-btn" style="padding:6px 8px;border-radius:6px;font-size:11.5px;font-weight:500;cursor:pointer;border-width:1px;border-style:solid;text-align:center;">View welcome guide</button>' +
 					'</div>';
-				modal.appendChild(actionsSection);
+				setBody.appendChild(actionsSection);
 
 				// Section 4: Help & local diagnostics. This intentionally performs no
 				// network request and never reads chat data; it only validates the
 				// small native bridge surface used by the application.
 				var helpSection = document.createElement('div');
 				helpSection.className = 'wa-modal-card';
-				helpSection.style.cssText = 'display:flex;flex-direction:column;gap:8px;border-radius:0;border-width:0 0 1px;border-style:solid;padding:14px 0;';
+				helpSection.setAttribute('data-cat', 'help');
+				helpSection.setAttribute('data-name', 'help diagnostics shortcuts check bridge storage keyboard');
 				helpSection.innerHTML = '' +
 					'<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">' +
 					'  <div><strong class="wa-text-primary" style="font-size:12.5px;">Help & diagnostics</strong><div class="wa-text-muted" style="font-size:11px;margin-top:2px;">Check the app surface locally. No chats or files are sent.</div></div>' +
@@ -3783,14 +6098,20 @@ func getInitScript(ua string) string {
 					'<div id="wa-diagnostics-result" class="wa-text-muted" aria-live="polite" style="display:none;font-size:10.5px;line-height:1.45;border-radius:6px;padding:7px 8px;"></div>' +
 					'<button id="wa-btn-show-shortcuts" style="align-self:flex-start;background:transparent;border:none;color:#00a884;font-size:11px;cursor:pointer;padding:2px 0;">View keyboard shortcuts</button>' +
 					'<div id="wa-shortcuts-list" class="wa-text-muted" style="display:none;font-size:10.5px;line-height:1.65;"></div>';
-				modal.appendChild(helpSection);
+				setBody.appendChild(helpSection);
+
+				// Footer rail (disclaimer + actions) — always visible at the
+				// end of the scroll, outside the tab-filtered body.
+				var footWrap = document.createElement('div');
+				footWrap.className = 'wa-set-foot';
+				modal.appendChild(footWrap);
 
 				// Disclaimer
 				var disclaimer = document.createElement('div');
 				disclaimer.className = 'wa-text-muted';
-				disclaimer.style.cssText = 'font-size:10px;line-height:1.4;border-top-width:1px;border-top-style:solid;padding-top:8px;margin-top:2px;';
+				disclaimer.style.cssText = 'font-size:10px;line-height:1.4;border-top-width:1px;border-top-style:solid;padding-top:8px;margin-bottom:8px;';
 				disclaimer.innerHTML = '<strong>WAtchful</strong> is an independent application and is not affiliated with Meta.';
-				modal.appendChild(disclaimer);
+				footWrap.appendChild(disclaimer);
 
 				// Footer
 				var footer = document.createElement('div');
@@ -3814,7 +6135,7 @@ func getInitScript(ua string) string {
 				footLeft.appendChild(btnReport);
 				footLeft.appendChild(btnDone);
 				footer.appendChild(footLeft);
-				modal.appendChild(footer);
+				footWrap.appendChild(footer);
 
 				overlay.appendChild(modal);
 				document.body.appendChild(overlay);
@@ -3823,6 +6144,9 @@ func getInitScript(ua string) string {
 
 				function closeSettings() {
 					window.removeEventListener('keydown', onKeyClose);
+					window.removeEventListener('resize', reflowTools);
+					try { if (afkStatusTimer) clearInterval(afkStatusTimer); } catch (e) {}
+					afkStatusTimer = null;
 					window.syncModalTheme = null;
 					if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
 				}
@@ -3836,38 +6160,122 @@ func getInitScript(ua string) string {
 					if (e.target === overlay) closeSettings();
 				};
 
-				// Styling Synchronizer for Modal (Dark / Light Theme)
+				// Category tabs + live search. Sections carry data-cat; only
+				// the active tab's sections show (the panel stays scannable
+				// instead of one long scroll). Search overrides tabs: while a
+				// query is typed every matching section shows with a small
+				// category label, so users find "zoom" or "startup" without
+				// knowing which tab it lives in.
+				var setTabs = Array.prototype.slice.call(modal.querySelectorAll('.wa-set-tab'));
+				var setSections = Array.prototype.slice.call(setBody.querySelectorAll('[data-cat]'));
+				var setNoResult = document.createElement('div');
+				setNoResult.className = 'wa-text-muted';
+				setNoResult.style.cssText = 'font-size:11.5px;padding:8px 0;display:none;';
+				setNoResult.textContent = 'No settings match your search.';
+				setBody.appendChild(setNoResult);
+				var activeTab = 'general';
+				function applyTab() {
+					for (var i = 0; i < setSections.length; i++) {
+						setSections[i].style.display =
+							(setSections[i].getAttribute('data-cat') === activeTab) ? '' : 'none';
+					}
+					for (var j = 0; j < setTabs.length; j++) {
+						setTabs[j].classList.toggle('wa-on',
+							setTabs[j].getAttribute('data-cat') === activeTab);
+					}
+					setNoResult.style.display = 'none';
+				}
+				function applySearch(q) {
+					q = (q || '').trim().toLowerCase();
+					if (!q) { applyTab(); return; }
+					var anyVisible = false;
+					for (var i = 0; i < setSections.length; i++) {
+						var hay = (setSections[i].textContent || '').toLowerCase();
+						var match = hay.indexOf(q) !== -1;
+						setSections[i].style.display = match ? '' : 'none';
+						if (match) anyVisible = true;
+					}
+					for (var j = 0; j < setTabs.length; j++) {
+						setTabs[j].classList.remove('wa-on');
+					}
+					setNoResult.style.display = anyVisible ? 'none' : '';
+				}
+				for (var ti = 0; ti < setTabs.length; ti++) {
+					(function(tab) {
+						tab.onclick = function() {
+							activeTab = tab.getAttribute('data-cat');
+							var searchInput = document.getElementById('wa-settings-search');
+							if (searchInput) searchInput.value = '';
+							applyTab();
+						};
+					})(setTabs[ti]);
+				}
+				var setSearch = document.getElementById('wa-settings-search');
+				if (setSearch) {
+					setSearch.oninput = function() { applySearch(setSearch.value); };
+				}
+				applyTab();
+				// Pin the tool rail right below the sticky header (and keep the
+				// offset fresh if the header reflows on a narrow window).
+				var reflowTools = function() { toolsRow.style.top = header.offsetHeight + 'px'; };
+				reflowTools();
+				window.addEventListener('resize', reflowTools);
+
+				// Styling Synchronizer for Modal (Dark / Light Theme).
+				// One pass writes CSS custom properties on the panel; the
+				// scoped stylesheet derives cards, pills, inputs, switches
+				// and hover states from them, so the new layout repaints
+				// without per-element inline overrides fighting the CSS.
 				window.syncModalTheme = function(isThemeDark) {
 					var bg = isThemeDark ? '#111b21' : '#ffffff';
-					var cardBg = bg;
+					var surface = isThemeDark ? '#18262e' : '#f7f8fa';
 					var border = isThemeDark ? '#2a3942' : '#d1d7db';
 					var textPri = isThemeDark ? '#e9edef' : '#111b21';
 					var textMut = isThemeDark ? '#8696a0' : '#667781';
 					var accent = isThemeDark ? '#00a884' : '#008069';
+					var field = isThemeDark ? '#111b21' : '#ffffff';
 
+					modal.style.setProperty('--w-bg', bg);
+					modal.style.setProperty('--w-surface', surface);
+					modal.style.setProperty('--w-border', border);
+					modal.style.setProperty('--w-text', textPri);
+					modal.style.setProperty('--w-muted', textMut);
+					modal.style.setProperty('--w-accent', accent);
+					modal.style.setProperty('--w-field', field);
+					modal.style.setProperty('--w-hover', isThemeDark ? '#1f2f39' : '#eef1f4');
+					modal.style.setProperty('--w-accent-soft', isThemeDark ? 'rgba(0,168,132,.55)' : 'rgba(0,128,105,.5)');
+					modal.style.colorScheme = isThemeDark ? 'dark' : 'light';
 					modal.style.background = bg;
 					modal.style.border = '1px solid ' + border;
 					header.style.borderBottomColor = border;
+					header.style.background = bg;
 					document.getElementById('wa-modal-title').style.color = textPri;
 					document.getElementById('wa-modal-sub').style.color = textMut;
 					document.getElementById('wa-modal-icon-wrap').style.background = accent;
 					document.getElementById('wa-modal-icon-wrap').style.color = accent;
 					document.getElementById('wa-settings-close-x').style.color = textMut;
 
-					document.querySelectorAll('.wa-modal-card').forEach(function(el) {
-						el.style.background = cardBg;
-						el.style.borderColor = border;
-					});
-					document.querySelectorAll('.wa-text-primary').forEach(function(el) {
+					// Text helpers anywhere inside the panel (including the
+					// Profiles card injected later).
+					document.querySelectorAll('#wa-settings-overlay .wa-text-primary').forEach(function(el) {
 						el.style.color = textPri;
 					});
-					document.querySelectorAll('.wa-text-muted').forEach(function(el) {
+					document.querySelectorAll('#wa-settings-overlay .wa-text-muted').forEach(function(el) {
 						el.style.color = textMut;
 					});
 
+					// The Profiles card is injected after this pass with its
+					// own inline colors — repaint it so light theme doesn't
+					// keep the hardcoded dark surface.
+					var profilesCard = document.getElementById('wa-profiles-card');
+					if (profilesCard) {
+						profilesCard.style.background = surface;
+						profilesCard.style.borderColor = border;
+					}
+
 					var fBox = document.getElementById('wa-folder-box');
 					if (fBox) {
-						fBox.style.background = isThemeDark ? '#111b21' : '#ffffff';
+						fBox.style.background = field;
 						fBox.style.borderColor = border;
 					}
 					var fPath = document.getElementById('wa-folder-path');
@@ -3879,25 +6287,14 @@ func getInitScript(ua string) string {
 						btnOpen.style.color = isThemeDark ? '#111b21' : '#ffffff';
 					}
 
-					document.querySelectorAll('.wa-card-btn').forEach(function(el) {
-						el.style.background = isThemeDark ? '#111b21' : '#ffffff';
-						el.style.borderColor = border;
-						el.style.color = textPri;
-					});
-
 					btnDone.style.background = isThemeDark ? '#202c33' : '#e9edef';
 					btnDone.style.borderColor = border;
 					btnDone.style.color = textPri;
 
-					// Theme segment buttons
+					// Theme segment: active pill only (colors come from CSS vars).
 					['dark', 'light', 'system'].forEach(function(mode) {
 						var tBtn = document.getElementById('wa-theme-btn-' + mode);
-						if (tBtn) {
-							var active = (currentTheme === mode);
-							tBtn.style.background = active ? accent : (isThemeDark ? '#111b21' : '#ffffff');
-							tBtn.style.color = active ? (isThemeDark ? '#111b21' : '#ffffff') : textPri;
-							tBtn.style.borderColor = active ? accent : border;
-						}
+						if (tBtn) tBtn.classList.toggle('wa-on', currentTheme === mode);
 					});
 				};
 
@@ -3915,7 +6312,8 @@ func getInitScript(ua string) string {
 						badgePriv.textContent = privActive ? 'Enabled' : 'Disabled';
 						badgePriv.style.background = privActive ? (isThemeDark ? 'rgba(0,168,132,0.15)' : 'rgba(0,128,105,0.15)') : 'transparent';
 						badgePriv.style.color = privActive ? accent : '#8696a0';
-						btnPriv.textContent = privActive ? 'Disable' : 'Enable';
+						btnPriv.classList.toggle('wa-on', privActive);
+						btnPriv.setAttribute('aria-checked', privActive ? 'true' : 'false');
 					}
 
 					var pinActive = window.isAlwaysOnTopActive ? window.isAlwaysOnTopActive() : false;
@@ -3925,7 +6323,8 @@ func getInitScript(ua string) string {
 						badgePin.textContent = pinActive ? 'Pinned' : 'Unpinned';
 						badgePin.style.background = pinActive ? (isThemeDark ? 'rgba(0,168,132,0.15)' : 'rgba(0,128,105,0.15)') : 'transparent';
 						badgePin.style.color = pinActive ? accent : '#8696a0';
-						btnPin.textContent = pinActive ? 'Unpin' : 'Pin';
+						btnPin.classList.toggle('wa-on', pinActive);
+						btnPin.setAttribute('aria-checked', pinActive ? 'true' : 'false');
 					}
 
 					var muteActive = window.isAudioMuted ? window.isAudioMuted() : false;
@@ -3935,7 +6334,8 @@ func getInitScript(ua string) string {
 						badgeMute.textContent = muteActive ? 'Muted' : 'Unmuted';
 						badgeMute.style.background = muteActive ? 'rgba(234,0,56,0.15)' : 'transparent';
 						badgeMute.style.color = muteActive ? '#ff5252' : accent;
-						btnMute.textContent = muteActive ? 'Unmute' : 'Mute';
+						btnMute.classList.toggle('wa-on', muteActive);
+						btnMute.setAttribute('aria-checked', muteActive ? 'true' : 'false');
 					}
 
 					var notifActive = window.isNotificationsEnabled ? window.isNotificationsEnabled() : true;
@@ -3945,7 +6345,8 @@ func getInitScript(ua string) string {
 						badgeNotif.textContent = notifActive ? 'Enabled' : 'Disabled';
 						badgeNotif.style.background = notifActive ? (isThemeDark ? 'rgba(0,168,132,0.15)' : 'rgba(0,128,105,0.15)') : 'transparent';
 						badgeNotif.style.color = notifActive ? accent : '#8696a0';
-						btnNotif.textContent = notifActive ? 'Disable' : 'Enable';
+						btnNotif.classList.toggle('wa-on', notifActive);
+						btnNotif.setAttribute('aria-checked', notifActive ? 'true' : 'false');
 					}
 
 					var dlNotifActive = window.isNotifyOnDownload ? window.isNotifyOnDownload() : true;
@@ -3955,7 +6356,8 @@ func getInitScript(ua string) string {
 						badgeDlNotif.textContent = dlNotifActive ? 'Enabled' : 'Disabled';
 						badgeDlNotif.style.background = dlNotifActive ? (isThemeDark ? 'rgba(0,168,132,0.15)' : 'rgba(0,128,105,0.15)') : 'transparent';
 						badgeDlNotif.style.color = dlNotifActive ? accent : '#8696a0';
-						btnDlNotif.textContent = dlNotifActive ? 'Disable' : 'Enable';
+						btnDlNotif.classList.toggle('wa-on', dlNotifActive);
+						btnDlNotif.setAttribute('aria-checked', dlNotifActive ? 'true' : 'false');
 					}
 
 					var autoActive = window.isAutoStartActive ? window.isAutoStartActive() : false;
@@ -3965,7 +6367,8 @@ func getInitScript(ua string) string {
 						badgeAuto.textContent = autoActive ? 'Enabled' : 'Disabled';
 						badgeAuto.style.background = autoActive ? (isThemeDark ? 'rgba(0,168,132,0.15)' : 'rgba(0,128,105,0.15)') : 'transparent';
 						badgeAuto.style.color = autoActive ? accent : '#8696a0';
-						btnAuto.textContent = autoActive ? 'Disable' : 'Enable';
+						btnAuto.classList.toggle('wa-on', autoActive);
+						btnAuto.setAttribute('aria-checked', autoActive ? 'true' : 'false');
 					}
 
 					window.syncModalTheme(isThemeDark);
@@ -4237,6 +6640,408 @@ func getInitScript(ua string) string {
 						if (qrText) qrText.value = '';
 						renderQuickReplies();
 						showFloatingToast('⚡ Quick reply /' + saved + ' saved');
+					};
+				}
+
+				// Scheduler CRUD + log. User strings hit textContent only.
+				var schedList = document.getElementById('wa-sched-list');
+				var schedPhone = document.getElementById('wa-sched-phone');
+				var schedText = document.getElementById('wa-sched-text');
+				var schedWhen = document.getElementById('wa-sched-when');
+				var schedRepeat = document.getElementById('wa-sched-repeat');
+				var schedRepDay = document.getElementById('wa-sched-repday');
+				// Weekly needs a weekday: show the picker only then, and
+				// seed it from the parsed time until the user picks a
+				// day themselves.
+				var repDayTouched = false;
+				var SCHED_DAYS_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+				function syncRepDayVisibility() {
+					if (schedRepDay) {
+						schedRepDay.style.display =
+							(schedRepeat && schedRepeat.value === 'weekly') ? '' : 'none';
+					}
+				}
+				function seedRepDay(parsedMs) {
+					if (!schedRepDay || repDayTouched || !(parsedMs > 0)) return;
+					if (!schedRepeat || schedRepeat.value !== 'weekly') return;
+					try { schedRepDay.value = String(new Date(parsedMs).getDay()); } catch (e) {}
+				}
+				if (schedRepeat) {
+					schedRepeat.onchange = function() {
+						syncRepDayVisibility();
+						refreshSchedWhenPreview();
+					};
+				}
+				if (schedRepDay) {
+					schedRepDay.onchange = function() { repDayTouched = true; };
+				}
+				syncRepDayVisibility();
+				var schedLog = document.getElementById('wa-sched-log');
+				if (schedWhen) {
+					try {
+						var minD = new Date(Date.now() + 60000);
+						var pad = function(v) { return (v < 10 ? '0' : '') + v; };
+						schedWhen.min = minD.getFullYear() + '-' + pad(minD.getMonth() + 1) + '-' + pad(minD.getDate()) + 'T' + pad(minD.getHours()) + ':' + pad(minD.getMinutes());
+					} catch (e) {}
+				}
+				function fmtSchedWhen(ms) {
+					try {
+						return new Date(ms).toLocaleString();
+					} catch (e) {
+						return String(ms);
+					}
+				}
+				function renderSchedules() {
+					if (!schedList || !window.getSchedules) return;
+					schedList.textContent = '';
+					var list = window.getSchedules();
+					if (!list.length) {
+						var empty = document.createElement('div');
+						empty.className = 'wa-text-muted';
+						empty.style.cssText = 'font-size:11px;padding:2px 0;';
+						empty.textContent = 'No scheduled messages — add one below.';
+						schedList.appendChild(empty);
+					}
+					for (var i = 0; i < list.length; i++) {
+						(function(item) {
+							var row = document.createElement('div');
+							row.style.cssText = 'display:flex;align-items:center;gap:8px;';
+							var chip = document.createElement('span');
+							chip.style.cssText = 'font-family:monospace;font-size:11px;font-weight:700;color:#00a884;flex-shrink:0;';
+							chip.textContent = '+' + item.phone;
+							var mid = document.createElement('span');
+							mid.className = 'wa-text-muted';
+							mid.style.cssText = 'font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0;';
+							var rlabel = item.repeat;
+							if (item.repeat === 'weekly' && typeof item.repeatDay === 'number') {
+								rlabel += ' ' + (SCHED_DAYS_SHORT[item.repeatDay] || '');
+							}
+							mid.textContent = item.text + ' · ' + fmtSchedWhen(item.nextFire) + ' · ' + rlabel + (item.enabled ? '' : ' (off)');
+							var tog = document.createElement('button');
+							tog.className = 'wa-card-btn';
+							tog.style.cssText = 'padding:3px 9px;border-radius:6px;font-size:11px;cursor:pointer;border-width:1px;border-style:solid;flex-shrink:0;';
+							tog.textContent = item.enabled ? 'On' : 'Off';
+							tog.onclick = function() {
+								if (window.toggleSchedule) window.toggleSchedule(item.id, !item.enabled);
+								renderSchedules();
+							};
+							var del = document.createElement('button');
+							del.className = 'wa-card-btn';
+							del.style.cssText = 'padding:3px 9px;border-radius:6px;font-size:11px;cursor:pointer;border-width:1px;border-style:solid;flex-shrink:0;';
+							del.textContent = 'Delete';
+							del.onclick = function() {
+								if (window.deleteSchedule) window.deleteSchedule(item.id);
+								renderSchedules();
+								renderSchedLog();
+							};
+							row.appendChild(chip);
+							row.appendChild(mid);
+							row.appendChild(tog);
+							row.appendChild(del);
+							schedList.appendChild(row);
+						})(list[i]);
+					}
+				}
+				function renderSchedLog() {
+					if (!schedLog || !window.getScheduleLog) return;
+					schedLog.textContent = '';
+					var log = window.getScheduleLog().slice(0, 10);
+					if (!log.length) {
+						var empty = document.createElement('div');
+						empty.className = 'wa-text-muted';
+						empty.style.cssText = 'font-size:11px;padding:2px 0;';
+						empty.textContent = 'Nothing sent yet.';
+						schedLog.appendChild(empty);
+						return;
+					}
+					for (var i = 0; i < log.length; i++) {
+						var line = document.createElement('div');
+						line.className = 'wa-text-muted';
+						line.style.cssText = 'font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+						line.style.cssText = 'font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;user-select:text;-webkit-user-select:text;cursor:text;';
+						line.textContent = fmtSchedWhen(log[i].at) + ' · +' + log[i].phone + ' · ' + log[i].status + ' · ' + log[i].text;
+						schedLog.appendChild(line);
+					}
+				}
+				var schedLogCopy = document.getElementById('wa-sched-logcopy');
+				if (schedLogCopy) {
+					schedLogCopy.addEventListener('click', function() {
+						try {
+							var all = (window.getScheduleLog ? window.getScheduleLog() : []);
+							var txt = '';
+							for (var i = 0; i < all.length; i++) {
+								txt += fmtSchedWhen(all[i].at) + ' · +' + all[i].phone + ' · ' + all[i].status + ' · ' + all[i].text + '\n';
+							}
+							if (!txt) txt = '(empty log)';
+							var done = function() { showFloatingToast('📋 Scheduler log copied'); };
+							if (navigator.clipboard && navigator.clipboard.writeText) {
+								navigator.clipboard.writeText(txt).then(done, function() {});
+							}
+						} catch (e) {}
+					});
+				}
+				renderSchedules();
+				renderSchedLog();
+				var schedKill = document.getElementById('wa-sched-kill');
+				if (schedKill) {
+					try {
+						schedKill.checked = localStorage.getItem('wa_desk_sched_killed') === '1';
+					} catch (e) {}
+					schedKill.onchange = function() {
+						if (window.setSchedulerKilled) window.setSchedulerKilled(schedKill.checked);
+						showFloatingToast(schedKill.checked ?
+							'🛑 Scheduler halted — no scheduled sends until re-enabled' :
+							'⏰ Scheduler running again');
+					};
+				}
+				var schedAdd = document.getElementById('wa-sched-add');
+				var schedWhenText = document.getElementById('wa-sched-whentext');
+				var schedWhenPreview = document.getElementById('wa-sched-whenpreview');
+				function refreshSchedWhenPreview() {
+					if (!schedWhenPreview) return;
+					var raw = schedWhenText ? schedWhenText.value : '';
+					if (!raw.trim()) {
+						schedWhenPreview.style.display = 'none';
+						return;
+					}
+					var parsed = window.parseSchedWhen ? window.parseSchedWhen(raw) : 0;
+					schedWhenPreview.style.display = 'block';
+					seedRepDay(parsed);
+					var then = '';
+					if (schedRepeat && schedRepeat.value && schedRepeat.value !== 'once') {
+						then = ' · then ' + schedRepeat.value;
+						if (schedRepeat.value === 'weekly' && schedRepDay) {
+							then += ' ' + (SCHED_DAYS_SHORT[Number(schedRepDay.value)] || '');
+						}
+					}
+					try {
+						schedWhenPreview.textContent = parsed > Date.now() ?
+							'→ ' + new Date(parsed).toLocaleString() + then :
+							'not understood — try "2h", "21:00", "tomorrow 08:00" or "fri 18:00"';
+					} catch (e) {
+						schedWhenPreview.textContent = 'not understood';
+					}
+				}
+				if (schedWhenText) {
+					schedWhenText.addEventListener('input', refreshSchedWhenPreview);
+				}
+				if (schedAdd) {
+					schedAdd.onclick = function() {
+						if (!window.addSchedule) return;
+						// Typed natural time wins over the picker when present.
+						var typed = schedWhenText ? schedWhenText.value.trim() : '';
+						var whenMs = 0;
+						if (typed) {
+							whenMs = window.parseSchedWhen ? window.parseSchedWhen(typed) : 0;
+							if (!(whenMs > Date.now())) {
+								showFloatingToast('⚠️ Time not understood — try "2h", "21:00", "tomorrow 08:00" or "fri 18:00"');
+								return;
+							}
+						} else {
+							whenMs = schedWhen && schedWhen.value ? new Date(schedWhen.value).getTime() : 0;
+						}
+						if (whenMs > 0) seedRepDay(whenMs);
+						var id = window.addSchedule(
+							schedPhone ? schedPhone.value : '',
+							schedText ? schedText.value : '',
+							whenMs,
+							schedRepeat ? schedRepeat.value : 'once',
+							schedRepDay ? schedRepDay.value : '');
+						if (!id) {
+							showFloatingToast('⚠️ Valid number, message and future time required');
+							return;
+						}
+						if (schedPhone) schedPhone.value = '';
+						if (schedText) schedText.value = '';
+						if (schedWhenText) {
+							schedWhenText.value = '';
+							refreshSchedWhenPreview();
+						}
+						renderSchedules();
+						showFloatingToast('⏰ Message scheduled');
+					};
+				}
+
+				// AFK auto-reply settings + activity log. User strings hit
+				// textContent only.
+				var afkStatusTimer = null;
+				var afkEnable = document.getElementById('wa-afk-enable');
+				var afkText = document.getElementById('wa-afk-text');
+				var afkCooldown = document.getElementById('wa-afk-cooldown');
+				var afkGroups = document.getElementById('wa-afk-groups');
+				var afkWindow = document.getElementById('wa-afk-window');
+				var afkStart = document.getElementById('wa-afk-start');
+				var afkEnd = document.getElementById('wa-afk-end');
+				var afkHint = document.getElementById('wa-afk-windowhint');
+				var afkKill = document.getElementById('wa-afk-kill');
+				var afkLogBox = document.getElementById('wa-afk-log');
+				var afkAllowOnly = document.getElementById('wa-afk-allowonly');
+				var afkAllow = document.getElementById('wa-afk-allow');
+				var afkStatusBox = document.getElementById('wa-afk-status');
+				var afkProbeBtn = document.getElementById('wa-afk-probe');
+				var afkProbeOut = document.getElementById('wa-afk-probeout');
+				function renderAfkStatus() {
+					if (!afkStatusBox || !window.__waAfkStatus) return;
+					try {
+						var st = window.__waAfkStatus();
+						afkStatusBox.textContent = (st.armed ? '● ' : '○ ') + st.reason;
+					} catch (e) {}
+				}
+				function renderAfkLog() {
+					if (!afkLogBox || !window.getAfkLog) return;
+					afkLogBox.textContent = '';
+					var log = window.getAfkLog().slice(0, 8);
+					if (!log.length) {
+						var empty = document.createElement('div');
+						empty.className = 'wa-text-muted';
+						empty.style.cssText = 'font-size:11px;padding:2px 0;';
+						empty.textContent = 'No auto-replies yet.';
+						afkLogBox.appendChild(empty);
+						return;
+					}
+					for (var i = 0; i < log.length; i++) {
+						var line = document.createElement('div');
+						line.className = 'wa-text-muted';
+						line.style.cssText = 'font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+						try {
+							line.textContent = new Date(log[i].at).toLocaleString() + ' · ' + (log[i].chat || '—') + ' · ' + log[i].status;
+						} catch (e) {
+							line.textContent = String(log[i].status || '');
+						}
+						afkLogBox.appendChild(line);
+					}
+				}
+				if (window.getAfkConfig) {
+					var afkCfg = window.getAfkConfig();
+					if (afkEnable) afkEnable.checked = !!afkCfg.enabled;
+					if (afkText) afkText.value = afkCfg.text;
+					if (afkCooldown) afkCooldown.value = String(afkCfg.cooldownMin);
+					if (afkGroups) afkGroups.checked = !!afkCfg.groups;
+					if (afkAllowOnly) afkAllowOnly.checked = !!afkCfg.allowOnly;
+					if (afkAllow) afkAllow.value = (afkCfg.allowed || []).join('\n');
+					// Reply window: seed the time pickers from stored minutes
+					// (or the 21:00-07:00 default) and dim them while the
+					// window is off.
+					function minsToHM(m) {
+						m = (m >= 0 && m < 1440) ? Math.floor(m) : 0;
+						var h = Math.floor(m / 60), mm = m % 60;
+						return (h < 10 ? '0' : '') + h + ':' + (mm < 10 ? '0' : '') + mm;
+					}
+					function syncAfkWindowUI(cfg) {
+						if (afkWindow) afkWindow.checked = !!cfg.useWindow;
+						if (afkStart) {
+							afkStart.value = minsToHM(cfg.startMin);
+							afkStart.disabled = !cfg.useWindow;
+						}
+						if (afkEnd) {
+							afkEnd.value = minsToHM(cfg.endMin);
+							afkEnd.disabled = !cfg.useWindow;
+						}
+						if (afkHint) {
+							if (!cfg.useWindow) {
+								afkHint.textContent = '';
+							} else {
+								var active = window.__waAfkInWindow ?
+									window.__waAfkInWindow(cfg, Date.now()) : true;
+								afkHint.textContent = (active ? '● active now' : '○ outside hours') +
+									' ' + minsToHM(cfg.startMin) + '–' + minsToHM(cfg.endMin) +
+									((cfg.startMin > cfg.endMin) ? ' (overnight)' : '');
+							}
+						}
+					}
+					syncAfkWindowUI(afkCfg);
+					var syncAfk = function() {
+						if (!window.setAfkConfig) return;
+						var saved = window.setAfkConfig({
+							enabled: !!(afkEnable && afkEnable.checked),
+							text: afkText ? afkText.value : '',
+							cooldownMin: parseInt(afkCooldown && afkCooldown.value, 10),
+							groups: !!(afkGroups && afkGroups.checked),
+							useWindow: !!(afkWindow && afkWindow.checked),
+							startMin: afkStart ? afkStart.value : '',
+							endMin: afkEnd ? afkEnd.value : '',
+							allowOnly: !!(afkAllowOnly && afkAllowOnly.checked),
+							allowed: afkAllow ? afkAllow.value : ''
+						});
+						syncAfkWindowUI(saved);
+						if (afkEnable && afkEnable.checked && !saved.enabled) {
+							afkEnable.checked = false;
+							showFloatingToast('⚠️ AFK reply message is empty');
+						}
+					};
+					if (afkEnable) afkEnable.onchange = syncAfk;
+					if (afkText) afkText.onchange = syncAfk;
+					if (afkCooldown) afkCooldown.onchange = syncAfk;
+					if (afkGroups) afkGroups.onchange = syncAfk;
+					if (afkAllowOnly) afkAllowOnly.onchange = syncAfk;
+					if (afkAllow) afkAllow.onchange = syncAfk;
+					if (afkWindow) afkWindow.onchange = syncAfk;
+					if (afkStart) afkStart.onchange = syncAfk;
+					if (afkEnd) afkEnd.onchange = syncAfk;
+					renderAfkLog();
+					renderAfkStatus();
+					if (afkProbeBtn) {
+						afkProbeBtn.onclick = function() {
+							if (!window.__waAfkProbe || !afkProbeOut) return;
+							var p = {};
+							try { p = window.__waAfkProbe(); } catch (e) {}
+							var lines = [
+								'pane-side: ' + (p.paneSide ? 'yes' : 'MISSING (body fallback)'),
+								'chat rows: ' + p.rows,
+								'unread-pill badges: ' + p.pills,
+								'aria unread: ' + p.ariaUnread + ' · belum-dibaca: ' + p.ariaID,
+								'titled row buttons: ' + p.titledButtons,
+								'tab title: ' + (p.docTitle || '(empty)'),
+								'candidates: ' + ((p.candidates && p.candidates.length) ? p.candidates.join(', ') : '(none)')
+							];
+							for (var i = 0; i < ((p.samples && p.samples.length) || 0); i++) {
+								lines.push('row' + i + ' buttons: ' + (p.samples[i].buttons.join(' | ') || '(none)'));
+								lines.push('row' + i + ' testids: ' + (p.samples[i].testids.join(', ') || '(none)'));
+							}
+							for (var u2 = 0; u2 < ((p.unreadEls && p.unreadEls.length) || 0); u2++) {
+								var ue = p.unreadEls[u2];
+								lines.push('unread' + u2 + ': <' + ue.tag + '> tid=' + (ue.testid || '-') +
+									' aria="' + ue.aria + '" row=' + ue.row + ' <- ' + ue.path.join(' < '));
+							}
+							for (var r2 = 0; r2 < ((p.rowDetail && p.rowDetail.length) || 0); r2++) {
+								var rd = p.rowDetail[r2];
+								lines.push('detail' + r2 + ' row: ' + rd.rowAttrs +
+									' nameLen=' + rd.nameLen + ' titleTids=' + rd.titleTidCount);
+								lines.push('detail' + r2 + ' click: ' + (rd.clickables.join(' | ') || '(none)'));
+							}
+							if (p.error) lines.push('error: ' + p.error);
+							lines.push('main: found=' + (p.mainFound ? 'yes' : 'no') +
+								' footer=' + (p.mainFooter ? 'yes' : 'no') +
+								' editables=' + p.mainEditables +
+								' header="' + (p.mainHeader || '-') + '"');
+							if (p.mainHeaderAll && p.mainHeaderAll.length) {
+								lines.push('main-headers: ' + p.mainHeaderAll.join(' | '));
+							}
+							if (p.mainHeaderText) lines.push('main-header-text: ' + p.mainHeaderText);
+							if (p.mainHeaderHTML) lines.push('main-header-html: ' + p.mainHeaderHTML);
+							lines.push('probe: ' + (p.probe || '?'));
+							lines.push('app: ' + ((p.appShell && p.appShell.join(' ')) || '(no #app)'));
+							lines.push('app-deep: ' + ((p.appDeep && p.appDeep.join(' ')) || '-'));
+							lines.push('doc-wide: footers=' + p.docFooters + ' editables=' + p.docEditables);
+							if (p.titleHTML) lines.push('titleHTML: ' + p.titleHTML);
+							afkProbeOut.style.display = 'block';
+							afkProbeOut.textContent = lines.join('\n');
+						};
+					}
+					// Keep the status line live while the panel is open; the
+					// closer below stops the timer with the overlay.
+					afkStatusTimer = setInterval(function() {
+						renderAfkStatus();
+						renderAfkLog();
+					}, 3000);
+				}
+				if (afkKill) {
+					try { afkKill.checked = localStorage.getItem('wa_desk_afk_killed') === '1'; } catch (e) {}
+					afkKill.onchange = function() {
+						if (window.setAFKKilled) window.setAFKKilled(afkKill.checked);
+						showFloatingToast(afkKill.checked ?
+							'🛑 AFK auto-reply halted — no replies until re-enabled' :
+							'🤖 AFK auto-reply ready');
 					};
 				}
 			};

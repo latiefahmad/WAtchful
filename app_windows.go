@@ -779,19 +779,49 @@ func setupProfileBindings(w webview2.WebView, ctx *profileViewContext) {
 		)
 	})
 
-	// Renderer recycler gate: the page reports downloads in flight and open
-	// document previews so the tab shell never rebuilds the engine under
-	// them (the download would die with the old renderer). Rebinding per
-	// rebuilt view keeps the tab routed to the right profile.
+	// Renderer recycler gate: the page reports downloads in flight, open
+	// document previews and armed scheduled sends so the tab shell never
+	// suspends, hibernates or rebuilds the engine under them. The profile
+	// comes from this view's own context (the page only sends kind + state),
+	// so rebinding per rebuilt view keeps every tab routed correctly.
 	tabSetProfileBusyState = func(profileID, kind string, on bool) {
 		if s := theShell; s != nil {
 			s.setProfileBusyState(profileID, kind, on)
 		}
 	}
-	_ = w.Bind("setBusyStateNative", func(profileID, kind string, on bool) {
+	_ = w.Bind("setBusyStateNative", func(kind string, on bool) {
 		if tabSetProfileBusyState != nil {
-			tabSetProfileBusyState(profileID, kind, on)
+			tabSetProfileBusyState(ctx.profile.ID, kind, on)
 		}
+	})
+
+	// waCdpNative: page-side trusted-input bridge. The scheduler and
+	// AFK auto-reply type into WhatsApp's Lexical composer through CDP
+	// (Input.insertText) because every synthetic DOM edit is reverted
+	// by WhatsApp's trust gate (field log: insert path=none len=0).
+	// Returns immediately; the CDP completion is delivered later via
+	// window.__waCdpResult({id, ok, result}).
+	_ = w.Bind("waCdpNative", func(id string, method string, params string) string {
+		cv, ok := w.(*chromiumView)
+		if !ok {
+			return "err:no-cdp-view"
+		}
+		err := cv.callCDP(method, params, func(hr uintptr, result string) {
+			payload, mErr := json.Marshal(map[string]interface{}{
+				"id":     id,
+				"ok":     int32(hr) >= 0 && !strings.Contains(result, "\"error\""),
+				"result": result,
+			})
+			if mErr != nil {
+				return
+			}
+			quoted, _ := json.Marshal(string(payload))
+			cv.Eval("try{window.__waCdpResult(" + string(quoted) + ")}catch(e){}")
+		})
+		if err != nil {
+			return "err:" + err.Error()
+		}
+		return "ok"
 	})
 
 	// Bind external link handler to open links in default Windows browser

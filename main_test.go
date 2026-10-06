@@ -180,6 +180,8 @@ func TestSettingsControlsRemainWired(t *testing.T) {
 		"wa-btn-check-updates-modal", "wa-btn-reload-modal", "wa-btn-hardref-modal", "wa-btn-onboard-modal",
 		"wa-action-open-directchat",
 		"wa-qr-trigger", "wa-qr-text", "wa-qr-add",
+		"wa-sched-phone", "wa-sched-text", "wa-sched-when", "wa-sched-repeat", "wa-sched-add",
+		"wa-sched-whentext", "wa-sched-whenpreview", "wa-sched-kill",
 		"wa-btn-run-diagnostics", "wa-btn-show-shortcuts",
 		"wa-zoom-out", "wa-zoom-in", "wa-zoom-reset",
 	}
@@ -261,6 +263,34 @@ func TestPageZoomWiringPersists(t *testing.T) {
 	// 75% must be reachable (the level the user asked for).
 	if !strings.Contains(script, "0.75") {
 		t.Error("zoom ladder must include 75%")
+	}
+}
+
+// The Settings panel is a two-level navigation now: sticky search + category
+// pills filter a grid of rounded section cards (data-cat), toggle rows are
+// switch-style buttons, and syncModalTheme repaints everything through CSS
+// custom properties instead of per-card inline styles.
+func TestSettingsPanelLayoutAndDiscovery(t *testing.T) {
+	script := getInitScript("test-agent")
+	for _, want := range []string{
+		"id=\"wa-settings-search\"", "id=\"wa-settings-tabs\"",
+		"wa-settings-body", "wa-set-tools",
+		"setAttribute('data-cat'",
+		".wa-switch", "role=\"switch\"",
+		".wa-segbtn",
+		"function applyTab()", "function applySearch(",
+		"--w-surface", "--w-accent", "modal.style.setProperty",
+		"setNoResult",
+		"toolsRow.style.top = header.offsetHeight",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("settings panel layout is missing %q", want)
+		}
+	}
+	// The old per-row inline segment styling must stay gone (the Profiles
+	// card keeps its legacy marker string, so only check the theme pills).
+	if strings.Contains(script, "class=\"wa-theme-btn\"") {
+		t.Error("unstyled theme segment buttons are back")
 	}
 }
 
@@ -1042,4 +1072,306 @@ func TestQuickRepliesWiring(t *testing.T) {
 			t.Errorf("quick-reply wiring is missing %q", want)
 		}
 	}
+}
+
+// Scheduler: per-profile timed messages to phone numbers. Store +
+// recurrence in-page; fire navigates to /send?phone= with a persisted
+// pending payload that the boot handler completes (composer -> send ->
+// verify); armed tabs report busy('scheduled') so the shell keeps them
+// alive instead of suspending/hibernating under a waiting send.
+func TestSchedulerWiring(t *testing.T) {
+	script := getInitScript("test-agent")
+	for _, want := range []string{
+		"wa_desk_schedules",
+		"wa_desk_pending_send",
+		"window.getSchedules",
+		"window.addSchedule",
+		"window.deleteSchedule",
+		"window.toggleSchedule",
+		"window.getScheduleLog",
+		"s.repeat === 'monthly'",
+		"s.repeat === 'yearly'",
+		"setMonth(dm.getMonth() + 1)",
+		"setFullYear(dy.getFullYear() + 1)",
+		"window.__waAdvanceSchedule",
+		"repeatDay",
+		"item.dom",
+		"item.yday",
+		"wa-sched-repday",
+		"seedRepDay",
+		"__waReportBusy('scheduled'",
+		"data-icon=\"send\"",
+		"wa-sched-list",
+		"wa-sched-add",
+		"wa-sched-log",
+		"send?phone=",
+		"window.parseSchedWhen",
+		"wa-sched-whentext",
+		"wa-sched-whenpreview",
+		"refreshSchedWhenPreview",
+		"wa_desk_last_sent",
+		"wa_desk_send_times",
+		"noteBreakerTripped",
+		"CLAIM_TTL",
+		"pending.claimedAt",
+		"failed (interrupted)",
+		"wa_desk_sched_boots",
+		"recordBootWatched",
+		"schedFrozen()",
+		"reboot loop",
+		"lastFiredAt",
+		"cancelled (schedule removed)",
+		"seenPayloads",
+		"payloadKey",
+		"wa_desk_sched_killed",
+		"setSchedulerKilled",
+		"schedKilled()",
+		"wa-sched-kill",
+		"bootId",
+		"attemptId",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("scheduler wiring is missing %q", want)
+		}
+	}
+}
+
+// AFK auto-reply: while armed, one automatic reply per chat per cooldown
+// on new unread; the mode ends the moment the user sends a message
+// themselves. Safety mirrors the scheduler: kill switch, cooldown claimed
+// before any click, burst breaker, in-flight boot recovery, identity check
+// against the opened chat header, and it yields the composer while a
+// scheduler payload is queued. Armed tabs report busy('scheduled').
+func TestAFKWiring(t *testing.T) {
+	script := getInitScript("test-agent")
+	for _, want := range []string{
+		"wa_desk_afk_cfg",
+		"wa_desk_afk_last",
+		"wa_desk_afk_send_times",
+		"wa_desk_afk_log",
+		"wa_desk_afk_killed",
+		"wa_desk_afk_inflight",
+		"window.getAfkConfig",
+		"window.setAfkConfig",
+		"window.__waAfkInWindow",
+		"window.__waAfkStatus",
+		"window.__waAfkProbe",
+		"wa-afk-probe",
+		"wa-afk-probeout",
+		"Diagnose scan",
+		"unreadEls",
+		"rowDetail",
+		"cell-frame-title",
+		"icon-unread-count",
+		"gridcell",
+		"__waAfkNoComposerReason",
+		"afkNoComposerReason",
+		"skipped (channel, no reply box)",
+		"mainEditables",
+		"activateAfkRow",
+		"__waActivateAfkRow",
+		"triedFallback",
+		"cloneNode(true)",
+		"appShell",
+		"appDeep",
+		"titleHTML",
+		"__waAfkRowName",
+		"afkRowName",
+		"span[title]",
+		"mainHeaderAll",
+		"mainHeaderText",
+		"mainHeaderHTML",
+		"header.cloneNode(true)",
+		"__waAfkTrustedClick",
+		"afkTrustedClick",
+		"dispatchMouseEvent",
+		"stillKey",
+		"lastUserActivityAt",
+		"e.isTrusted",
+		"settings panel is open",
+		"resumes when idle",
+		"__waAfkAllowed",
+		"afkAllowed",
+		"allowOnly",
+		"wa-afk-allowonly",
+		"wa-afk-allow",
+		"skipped (not in list)",
+		"not in the reply list",
+		"wa-afk-status",
+		"afkStatusTimer",
+		"cooldownSkips",
+		"no unread chats right now",
+		"afkInWindow",
+		"useWindow",
+		"startMin",
+		"endMin",
+		"window.__waAfkMinsToHM",
+		"window.__waAfkHMToMins",
+		"window.setAFKKilled",
+		"window.getAfkLog",
+		"window.__afkTick",
+		"wa-afk-enable",
+		"wa-afk-text",
+		"wa-afk-cooldown",
+		"wa-afk-groups",
+		"wa-afk-window",
+		"wa-afk-start",
+		"wa-afk-end",
+		"wa-afk-kill",
+		"wa-afk-log",
+		"data-testid=\"unread-pill\"",
+		"findUnreadCandidates",
+		"startAfkReply",
+		"endAfkByUser",
+		"chat mismatch: saw",
+		"__waHeaderContainsKey",
+		"headerContainsKey",
+		"displayName",
+		"failed (unverified)",
+		"skipped (group)",
+		"off (you sent a message)",
+		"paused: burst limit",
+		"failed (interrupted)",
+		"SCHED_PENDING_KEY",
+		"recountAfkBusy",
+		"namesMatch",
+		"looksLikeGroup",
+		"bootId",
+		"attemptId",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("AFK wiring is missing %q", want)
+		}
+	}
+}
+
+// Every intended composer send — scheduler and AFK — must pass the shared
+// choke-point window.__waGuardSend: owner kill first, then a persisted
+// minimum gap, then a per-page budget; a repeat pace violation or an
+// exhausted budget trips the emergency (both kill switches + loud log).
+// Kill withdraws queued payloads immediately, switching a schedule off
+// cancels its pending send, and both engines expose their in-flight flags
+// so they can yield to (and never mistake) each other's sends.
+func TestSendGuardWiring(t *testing.T) {
+	script := getInitScript("test-agent")
+	for _, want := range []string{
+		"window.__waGuardSend",
+		"wa_send_budget",
+		"wa_last_send_click",
+		"wa_send_violations",
+		"emergency stop: send ",
+		"tripped [",
+		"cancelled (emergency stop)",
+		"cancelled (switched off)",
+		"cancelled (pending withdrawn)",
+		"blocked (send ",
+		"window.__afkInFlight",
+		"window.__schedInFlight",
+		"wa_desk_afk_killed",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("send guard wiring is missing %q", want)
+		}
+	}
+	// The polling-stage latch must exist in BOTH engines — a check
+	// without the set was how an early build could re-run its routine.
+	if n := strings.Count(script, "pollDone = true;"); n < 2 {
+		t.Errorf("poll stage latch set count = %d, want >= 2 (scheduler + AFK)", n)
+	}
+}
+
+// The composer pipeline that turns "text visible in the draft" into an
+// actually delivered message: insert via execCommand → beforeinput →
+// direct replace WITH an input event (state sync — otherwise MIC never
+// becomes SEND), then a send stage that waits out the async MIC→SEND
+// re-render before clicking, with a keyCode-13 Enter as last resort.
+// Both engines must use the shared helpers.
+func TestComposerSendPipeline(t *testing.T) {
+	script := getInitScript("test-agent")
+	for _, want := range []string{
+		"window.__waInsertText",
+		"window.__waSendWithWait",
+		"window.__waClickSend",
+		"window.__waEnterSend",
+		"window.__waComposerText",
+		"window.__waFooterSnapshot",
+		"execCommand('insertText'",
+		"#main footer [data-icon=\"send\"]",
+		"aria-label=\"Send\"",
+		"data-testid=\"send\"",
+		"Kirim",
+		"keyCode",
+		"return 13",
+		"new Event('input'",
+		"ClipboardEvent('paste'",
+		"insertFromPaste",
+		"clipboardData",
+		"dom-plain",
+		"wa-sched-logcopy",
+		"Copy log",
+		"window.__waInsertAsync",
+		"window.__waTrustedInsert",
+		"window.__waCdpResult",
+		"window.__waCdpCb",
+		"'Input.insertText'",
+		"waCdpNative",
+		"diag: insert path=",
+		"send clicked after ",
+		"enter fired at ",
+		"no send trigger by ",
+		"send-wait start; footer=",
+		"checks >= 16",
+		"checks >= 32",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("composer send pipeline is missing %q", want)
+		}
+	}
+	if n := strings.Count(script, "__waSendWithWait(composer"); n < 2 {
+		t.Errorf("send-wait call sites = %d, want >= 2 (scheduler + AFK)", n)
+	}
+	if n := strings.Count(script, "__waInsertText(composer,"); n < 2 {
+		t.Errorf("insert call sites = %d, want >= 2 (scheduler + AFK)", n)
+	}
+	if n := strings.Count(script, "__waInsertAsync(composer"); n < 2 {
+		t.Errorf("async insert call sites = %d, want >= 2 (scheduler + AFK)", n)
+	}
+}
+
+// TestCDPBridgeWiring pins the trusted-input bridge end to end: the page
+// asks the host to run CDP Input.insertText, the Windows shell binds
+// waCdpNative, and the vendored WebView2 edge layer performs the
+// CallDevToolsProtocolMethod call. WhatsApp reverts every synthetic edit
+// (field: insert path=none len=0), so this channel is what actually
+// delivers scheduled messages.
+func TestCDPBridgeWiring(t *testing.T) {
+	script := getInitScript("test-agent")
+	for _, want := range []string{
+		"window.__waInsertAsync",
+		"window.__waTrustedInsert",
+		"window.__waCdp",
+		"window.__waCdpResult",
+		"'Input.insertText'",
+		"typeof window.waCdpNative === 'function'",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("page CDP bridge is missing %q", want)
+		}
+	}
+	checkFile := func(path string, wants ...string) {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		s := string(b)
+		for _, want := range wants {
+			if !strings.Contains(s, want) {
+				t.Errorf("%s is missing %q", path, want)
+			}
+		}
+	}
+	checkFile("app_windows.go", `Bind("waCdpNative"`, "callCDP(", "*chromiumView", "__waCdpResult(")
+	checkFile("tabs_windows.go", "func (v *chromiumView) callCDP(", "CallCDP(method, params, cb)")
+	checkFile("vendor/github.com/jchv/go-webview2/pkg/edge/cdp.go",
+		"CallDevToolsProtocolMethod", "Input.insertText", "cdpHandlerInvoke")
 }
