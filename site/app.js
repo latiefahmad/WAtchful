@@ -25,6 +25,7 @@
   };
 
   var STATIC_VERSION = "v2.0.14";
+  var STATIC_FILES = 8;
   var REPO_API = "https://api.github.com/repos/latiefahmad/WAtchful/releases/latest";
 
   var I18N = {
@@ -433,14 +434,18 @@
     var foot = $("#foot-version");
     var shot = $("#shot-main");
     var count = $("#stat-downloads");
+    var files = $("#stat-files");
     if (badge) badge.textContent = version;
     if (stat) stat.textContent = version;
     if (foot) foot.textContent = version;
     if (shot) shot.setAttribute("data-version", version);
-    if (count) {
-      if (rel && typeof rel.total_downloads === "number") count.textContent = formatCount(rel.total_downloads);
-      else count.textContent = "—";
+    var assets = rel && Array.isArray(rel.assets) ? rel.assets : null;
+    var total = 0;
+    if (assets) {
+      assets.forEach(function (a) { total += Number(a.download_count) || 0; });
     }
+    if (files) files.textContent = assets ? String(assets.length) : String(STATIC_FILES);
+    if (count) count.textContent = assets ? formatCount(total) : "—";
   }
 
   function loadRelease() {
