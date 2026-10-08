@@ -24,6 +24,8 @@ The screenshots use blurred chat content to protect personal information.
 
 **[Download the latest release →](https://github.com/latiefahmad/WAtchful/releases/latest)** — the page detects your OS and highlights the right file.
 
+Landing page: **[latiefahmad.github.io/WAtchful](https://latiefahmad.github.io/WAtchful/)** — bilingual (ID/EN), with interactive demos of the AFK allowlist and reply hours. Source lives in `site/`, published by `.github/workflows/pages.yml`.
+
 Latest published release: **v2.0.14** ([release notes](https://github.com/latiefahmad/WAtchful/releases/tag/v2.0.14))
 
 | Platform | Download |
