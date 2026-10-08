@@ -1,104 +1,355 @@
 <!doctype html>
-<html lang="en">
+<html lang="id" data-theme="dark">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="WAtchful — a focused desktop companion for WhatsApp Web on macOS, Windows, Linux, and Fedora.">
-  <title>WAtchful — A lighter desktop companion</title>
-  <style>
-    :root { --ink:#e9eee9; --muted:#9aa79f; --green:#18c77b; --deep:#07110e; --line:rgba(233,238,233,.13); --panel:#0d1b16; }
-    * { box-sizing:border-box; }
-    html { scroll-behavior:smooth; }
-    body { margin:0; color:var(--ink); background:var(--deep); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-    body::before { content:""; position:fixed; inset:0; pointer-events:none; opacity:.3; background-image:linear-gradient(rgba(255,255,255,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.025) 1px,transparent 1px); background-size:42px 42px; mask-image:linear-gradient(#000,transparent 72%); }
-    a { color:inherit; }
-    .wrap { max-width:1180px; margin:auto; padding:0 26px; position:relative; }
-    nav { height:82px; display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid var(--line); }
-    .brand { display:flex; align-items:center; gap:10px; font-family:Georgia,serif; font-size:21px; letter-spacing:-.5px; text-decoration:none; }
-    .brand i { display:block; width:11px; height:11px; border-radius:99px; background:var(--green); box-shadow:0 0 24px var(--green); }
-    .nav-link { color:var(--muted); font-size:12px; text-decoration:none; }
-    .hero { min-height:670px; display:grid; grid-template-columns:1.06fr .94fr; align-items:center; gap:52px; padding:88px 0 70px; }
-    .eyebrow { color:var(--green); font-size:12px; text-transform:uppercase; letter-spacing:.16em; }
-    h1 { font-family:Georgia,serif; font-size:clamp(48px,7vw,86px); font-weight:400; line-height:.94; letter-spacing:-.07em; margin:22px 0 24px; }
-    h1 em { color:var(--green); font-style:normal; }
-    .lead { max-width:550px; color:#bdc8c0; font-family:Georgia,serif; font-size:20px; line-height:1.45; }
-    .download { margin-top:34px; display:inline-flex; align-items:center; gap:12px; background:var(--green); border:1px solid var(--green); border-radius:4px; color:#06100c; padding:16px 20px; font:700 13px/1 ui-monospace,SFMono-Regular,Menlo,monospace; text-decoration:none; box-shadow:0 12px 35px rgba(24,199,123,.18); transition:transform .2s,box-shadow .2s; }
-    .download:hover { transform:translateY(-2px); box-shadow:0 18px 45px rgba(24,199,123,.28); }
-    .download svg { width:17px; height:17px; }
-    .badge { display:inline-block; margin-left:10px; padding:4px 10px; border:1px solid var(--green); border-radius:999px; color:var(--green); font:600 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace; text-decoration:none; vertical-align:middle; transition:background .2s; }
-    .badge:hover { background:rgba(24,199,123,.08); }
-    .under { display:block; color:var(--muted); margin-top:13px; font-size:10px; }
-    .frame { position:relative; padding:13px; border:1px solid rgba(24,199,123,.35); border-radius:12px; background:linear-gradient(145deg,rgba(24,199,123,.12),transparent 42%),#0b1713; transform:rotate(2deg); box-shadow:26px 28px 0 rgba(24,199,123,.07); }
-    .frame img { width:100%; display:block; border-radius:5px; filter:saturate(.9); }
-    .frame::after { content:"v2.0.14"; position:absolute; right:18px; bottom:-12px; color:var(--green); background:var(--deep); padding:5px 9px; font-size:10px; border:1px solid var(--line); }
-    .strip { border-top:1px solid var(--line); border-bottom:1px solid var(--line); display:grid; grid-template-columns:repeat(4,1fr); }
-    .strip div { padding:22px 18px; color:var(--muted); font-size:11px; border-right:1px solid var(--line); }
-    .strip strong { display:block; color:var(--ink); font-size:15px; margin-bottom:5px; }
-    section { padding:118px 0; }
-    .section-title { display:grid; grid-template-columns:1fr 1fr; gap:45px; margin-bottom:48px; }
-    h2 { font:400 clamp(34px,4vw,58px)/.98 Georgia,serif; letter-spacing:-.055em; margin:0; }
-    .section-title p { color:var(--muted); font:14px/1.7 ui-monospace,SFMono-Regular,Menlo,monospace; margin:0; align-self:end; }
-    .features { display:grid; grid-template-columns:repeat(3,1fr); border-top:1px solid var(--line); border-left:1px solid var(--line); }
-    .feature { min-height:184px; padding:25px; border-right:1px solid var(--line); border-bottom:1px solid var(--line); background:rgba(255,255,255,.015); }
-    .feature b { color:var(--green); font-size:11px; }
-    .feature h3 { font:400 24px/1.1 Georgia,serif; margin:19px 0 10px; }
-    .feature p { color:var(--muted); font-size:11px; line-height:1.65; margin:0; }
-    .downloads { background:#0b1813; border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
-    .download-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }
-    .platform { padding:22px; border:1px solid var(--line); background:#0d1e18; min-height:170px; display:flex; flex-direction:column; }
-    .platform span { color:var(--green); font-size:11px; }
-    .platform h3 { font:400 27px Georgia,serif; margin:16px 0 8px; }
-    .platform p { color:var(--muted); font-size:10px; line-height:1.55; margin:0 0 18px; }
-    .platform a { color:var(--ink); font-size:11px; margin-top:auto; text-decoration-thickness:1px; text-underline-offset:4px; }
-    .note { padding:18px 0 0; color:var(--muted); font-size:10px; line-height:1.6; }
-    .release { display:grid; grid-template-columns:.75fr 1.25fr; gap:38px; align-items:center; padding:95px 0; }
-    .release img { width:100%; border:1px solid var(--line); }
-    .release p { color:var(--muted); font:14px/1.7 Georgia,serif; }
-    footer { padding:32px 0 44px; border-top:1px solid var(--line); display:flex; justify-content:space-between; gap:18px; color:#718078; font-size:10px; }
-    @media (max-width:820px) { .hero,.section-title,.release { grid-template-columns:1fr; } .hero { padding-top:60px; } .frame { max-width:560px; margin:10px auto; } .strip,.download-grid,.features { grid-template-columns:1fr 1fr; } .strip div:nth-child(2) { border-right:0; } }
-    @media (max-width:520px) { .wrap { padding:0 18px; } nav { height:67px; } .nav-link { display:none; } .strip,.download-grid,.features { grid-template-columns:1fr; } .strip div { border-right:0; } section { padding:75px 0; } footer { flex-direction:column; } }
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WAtchful — WhatsApp di meja kerja Anda</title>
+<meta name="description" content="WAtchful: WhatsApp Web sebagai aplikasi desktop. Balas otomatis AFK dengan jam dan daftar kontak, jadwal berulang, Quick Replies, pratinjau dokumen, multi-profil, dan pembaruan otomatis.">
+<meta property="og:title" content="WAtchful — WhatsApp di meja kerja Anda">
+<meta property="og:description" content="Balas otomatis AFK dengan jam dan daftar kontak, jadwal berulang, Quick Replies, dan pembaruan otomatis.">
+<meta property="og:type" content="website">
+<meta property="og:image" content="assets/app-dark.png">
+<link rel="icon" href="assets/app-dark.png">
+<link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <div class="wrap">
-    <nav>
-      <a class="brand" href="#top"><i></i>WAtchful</a>
-      <a class="nav-link" href="https://github.com/latiefahmad/WAtchful/releases/latest">GitHub Releases ↗</a>
-    </nav>
-    <main id="top">
-      <div class="hero">
-        <div>
-          <div class="eyebrow">Independent desktop companion <a class="badge" href="https://github.com/latiefahmad/WAtchful/releases/latest">v2.0.14 · latest</a></div>
-          <h1>WhatsApp,<br><em>at your desk.</em></h1>
-          <p class="lead">A focused desktop home for WhatsApp Web—built with the native web engine already on your computer.</p>
-          <a id="smart-download" class="download" href="https://github.com/latiefahmad/WAtchful/releases/latest">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 21h16"/></svg>
-            <span>Download latest release</span>
-          </a>
-          <span id="platform-hint" class="under">Checking your platform…</span>
-        </div>
-        <div class="frame"><img src="assets/app-dark.png" alt="WAtchful chat window preview"></div>
+
+<nav class="nav">
+  <div class="wrap nav-in">
+    <a class="brand" href="#top"><i></i>WAtchful</a>
+    <div class="nav-links">
+      <a href="#fitur" data-i18n="nav.features">Fitur</a>
+      <a href="#afk" data-i18n="nav.afk">AFK</a>
+      <a href="#jadwal" data-i18n="nav.schedule">Jadwal</a>
+      <a href="#privasi" data-i18n="nav.privacy">Privasi</a>
+      <a href="#unduh" data-i18n="nav.download">Unduh</a>
+    </div>
+    <div class="nav-tools">
+      <div class="seg" role="group" aria-label="Language">
+        <button type="button" id="lang-id" aria-pressed="true">ID</button>
+        <button type="button" id="lang-en" aria-pressed="false">EN</button>
       </div>
-      <div class="strip"><div><strong>Native engine</strong>Uses WebKit, WebView2, or WebKitGTK.</div><div><strong>Private by design</strong>No analytics server or message relay.</div><div><strong>One download</strong>Files saved once, then reused locally.</div><div><strong>v2.0.14</strong>AFK replies only where you allow.</div></div>
-    </main>
+      <button class="icon-btn" id="theme-toggle" type="button" aria-label="Theme">
+        <svg id="theme-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg>
+      </button>
+      <a class="icon-btn" href="https://github.com/latiefahmad/WAtchful" aria-label="GitHub">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.7c-2.78.6-3.37-1.34-3.37-1.34-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.9 1.53 2.34 1.09 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.56-1.11-4.56-4.95 0-1.09.39-1.99 1.03-2.69-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.03a9.5 9.5 0 0 1 5 0c1.91-1.3 2.75-1.03 2.75-1.03.55 1.38.2 2.4.1 2.65.64.7 1.03 1.6 1.03 2.69 0 3.85-2.34 4.7-4.57 4.94.36.31.68.92.68 1.85v2.74c0 .27.18.58.69.48A10 10 0 0 0 12 2z"></path></svg>
+      </a>
+    </div>
   </div>
-  <section><div class="wrap"><div class="section-title"><h2>Small details.<br>Better desk time.</h2><p>WAtchful stays close to WhatsApp Web while adding the desktop controls that matter every day.</p></div><div class="features"><article class="feature"><b>01 / DOCUMENTS</b><h3>Preview, then decide.</h3><p>Open PDFs and common office files without unnecessary duplicate downloads.</p></article><article class="feature"><b>02 / CONTROL</b><h3>Your window, your way.</h3><p>Theme, privacy mode, always-on-top, audio mute, startup, and download location.</p></article><article class="feature"><b>03 / PERFORMANCE</b><h3>Quiet in the background.</h3><p>Non-essential enhancement work yields while busy chat lists are scrolling.</p></article></div></div></section>
-  <section class="downloads" id="download"><div class="wrap"><div class="section-title"><h2>Get the right<br>build.</h2><p>Automatic detection is a convenience. Every release is also available for manual download.</p></div><div class="download-grid"><article class="platform"><span>UNIVERSAL</span><h3>macOS</h3><p>Apple Silicon and Intel. DMG installer.</p><a href="https://github.com/latiefahmad/WAtchful/releases/latest/download/WAtchful-macOS-Universal.dmg">Download DMG ↗</a></article><article class="platform"><span>X64</span><h3>Windows</h3><p>Windows 10/11. WebView2 required.</p><a href="https://github.com/latiefahmad/WAtchful/releases/latest/download/WAtchful.exe">Download EXE ↗</a></article><article class="platform"><span>X64</span><h3>Linux</h3><p>Debian/Ubuntu, Fedora/RHEL, or portable archive.</p><a href="https://github.com/latiefahmad/WAtchful/releases/latest/download/WAtchful-Linux-amd64.deb">Download DEB ↗</a> · <a href="https://github.com/latiefahmad/WAtchful/releases/latest/download/WAtchful-Linux-x64.tar.gz">tar.gz ↗</a></article><article class="platform"><span>ARM64</span><h3>Linux ARM64</h3><p>Debian/Ubuntu package or portable archive for ARM64 machines.</p><a href="https://github.com/latiefahmad/WAtchful/releases/latest/download/WAtchful-Linux-arm64.deb">Download DEB ↗</a> · <a href="https://github.com/latiefahmad/WAtchful/releases/latest/download/WAtchful-Linux-arm64.tar.gz">tar.gz ↗</a></article></div><p class="note">Fedora/RHEL and other distributions: use the portable tar.gz. Linux ARM64 builds ship for every release. If platform detection is incorrect, select a build manually above.</p></div></section>
-  <div class="wrap"><section class="release"><div><div class="eyebrow">Latest release / 2.0.14</div><h2 style="margin-top:18px">Away?<br>Still answered.</h2><p>AFK auto-reply now reaches the right chat with a trusted click, respects your reply hours, and can answer only the names and numbers you list. Scheduled messages repeat daily, weekly, monthly or yearly. Updates arrive in-app: WAtchful checks for new releases shortly after startup and every 4 hours, then downloads, installs, and restarts itself — you only approve. No chat data is sent by these checks.</p><a class="download" href="https://github.com/latiefahmad/WAtchful/releases/tag/v2.0.14">View release notes ↗</a></div></section><footer><span>WAtchful is an independent application and is not affiliated with Meta.</span><span>MIT License · 2026</span></footer></div>
-  <script>
-    (function () {
-      var links = {
-        mac: ['https://github.com/latiefahmad/WAtchful/releases/latest/download/WAtchful-macOS-Universal.dmg', 'Download for macOS'],
-        windows: ['https://github.com/latiefahmad/WAtchful/releases/latest/download/WAtchful.exe', 'Download for Windows'],
-        linux: ['https://github.com/latiefahmad/WAtchful/releases/latest/download/WAtchful-Linux-x64.tar.gz', 'Download for Linux']
-      };
-      var platform = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '';
-      var selected = /mac/i.test(platform) ? 'mac' : /win/i.test(platform) ? 'windows' : /linux/i.test(platform) ? 'linux' : null;
-      var button = document.getElementById('smart-download');
-      var hint = document.getElementById('platform-hint');
-      if (selected) { button.href = links[selected][0]; button.querySelector('span').textContent = links[selected][1]; hint.textContent = 'Detected: ' + links[selected][1].replace('Download for ', '') + '. You can choose another build below.'; }
-      else { hint.textContent = 'Choose your platform below for the correct installer.'; }
-    }());
-  </script>
+</nav>
+
+<header class="wrap hero" id="top">
+  <div class="hero-copy">
+    <div class="eyebrow">
+      <span data-i18n="hero.eyebrow">Aplikasi desktop mandiri untuk WhatsApp</span>
+      <span class="chip"><span class="dot"></span><span id="version-badge" data-i18n="hero.version">v2.0.14</span></span>
+    </div>
+    <h1 data-i18n-html="hero.title">WhatsApp,<br><em>di meja kerja Anda.</em></h1>
+    <p class="lead" data-i18n="hero.lead">Semua kekuatan WhatsApp Web dalam satu jendela desktop yang rapi: multi-profil, balas otomatis AFK yang bisa Anda batasi, jadwal berulang, pratinjau dokumen, dan pembaruan sendiri.</p>
+    <div class="actions">
+      <a class="btn btn-primary btn-lg" id="smart-download" href="https://github.com/latiefahmad/WAtchful/releases/latest">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 21h16"></path></svg>
+        <span id="smart-download-label" data-i18n="hero.download">Unduh rilis terbaru</span>
+      </a>
+      <a class="btn btn-ghost" href="#unduh" data-i18n="hero.allBuilds">Lihat semua build</a>
+    </div>
+    <p class="hint" id="platform-hint" data-i18n="hero.detecting">Mendeteksi platform Anda…</p>
+    <ul class="stats">
+      <li><b id="stat-version" data-i18n="hero.version">v2.0.14</b><span data-i18n="stats.version">Versi</span></li>
+      <li><b id="stat-downloads">—</b><span data-i18n="stats.downloads">Unduhan</span></li>
+      <li><b>6</b><span data-i18n="stats.assets">Berkas rilis</span></li>
+      <li><b>MIT</b><span data-i18n="stats.license">Lisensi</span></li>
+    </ul>
+  </div>
+  <div>
+    <figure class="shot" id="shot-main" data-version="v2.0.14" data-full="assets/app-dark.png">
+      <img src="assets/app-dark.png" width="1920" height="1686" alt="Jendela WAtchful di desktop" loading="lazy">
+    </figure>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="strip">
+    <div><strong data-i18n="trust.1t">Mesin asli</strong><span data-i18n="trust.1b">WebView2, WebKit, atau WebKitGTK — bukan peramban tersembunyi.</span></div>
+    <div><strong data-i18n="trust.2t">Privat sejak awal</strong><span data-i18n="trust.2b">Tanpa server analitik atau relay pesan.</span></div>
+    <div><strong data-i18n="trust.3t">Sekali unduh</strong><span data-i18n="trust.3b">Berkas disimpan sekali, lalu dipakai ulang secara lokal.</span></div>
+    <div><strong data-i18n="trust.4t">Menjaga diri sendiri</strong><span data-i18n="trust.4b">Pembaruan otomatis di dalam aplikasi.</span></div>
+  </div>
+</div>
+
+<section class="wrap section" id="fitur">
+  <div class="section-head">
+    <div class="eyebrow" data-i18n="features.eyebrow">Yang berubah bulan ini</div>
+    <h2 data-i18n="features.title">Kontrol desktop yang benar-benar dipakai.</h2>
+    <p class="muted" data-i18n="features.lead">Enam bidang yang paling sering dipilih: apa yang berubah, dan mana yang hanya berjalan di belakang layar.</p>
+  </div>
+
+  <div class="tabs" role="tablist" aria-label="Fitur">
+    <button class="tab" type="button" role="tab" id="tab-afk" aria-controls="panel-afk" aria-selected="true" data-i18n="tabs.afk">Balas otomatis AFK</button>
+    <button class="tab" type="button" role="tab" id="tab-jadwal" aria-controls="panel-jadwal" aria-selected="false" data-i18n="tabs.schedule">Jadwal berulang</button>
+    <button class="tab" type="button" role="tab" id="tab-quick" aria-controls="panel-quick" aria-selected="false" data-i18n="tabs.quick">Quick Replies</button>
+    <button class="tab" type="button" role="tab" id="tab-preview" aria-controls="panel-preview" aria-selected="false" data-i18n="tabs.preview">Dokumen & unduhan</button>
+    <button class="tab" type="button" role="tab" id="tab-profil" aria-controls="panel-profil" aria-selected="false" data-i18n="tabs.profiles">Multi-profil</button>
+    <button class="tab" type="button" role="tab" id="tab-privasi" aria-controls="panel-privasi" aria-selected="false" data-i18n="tabs.privacy">Privasi</button>
+  </div>
+
+  <div class="panel is-on" id="panel-afk" role="tabpanel" aria-labelledby="tab-afk" tabindex="0">
+    <div>
+      <h3 data-i18n="afk.title">Balas otomatis yang tahu harus membalas siapa</h3>
+      <ul>
+        <li><b data-i18n="afk.f1t">DOM baru WhatsApp didukung penuh</b><span data-i18n="afk.f1b">Baris chat dikenali lewat struktur terbaru, dibuka dengan klik terverifikasi, lalu header dicek sebelum mengetik. Ketidakcocokan dicatat dan dilewati, bukan ditebak.</span></li>
+        <li><b data-i18n="afk.f2t">Jam balas</b><span data-i18n="afk.f2b">Batasi balasan ke rentang jam tertentu, termasuk rentang lintas malam seperti 21:00–07:00.</span></li>
+        <li><b data-i18n="afk.f3t">Daftar izin</b><span data-i18n="afk.f3b">Opsional: hanya balas nama atau nomor yang Anda daftarkan. Cocok sebagian, angka dicocokkan per digit dengan atau tanpa +62 / nol di depan.</span></li>
+        <li><b data-i18n="afk.f4t">Status & diagnostik</b><span data-i18n="afk.f4b">Baris status langsung menjelaskan alasan AFK diam, dan tombol Diagnose scan melaporkan yang dilihat pemindai.</span></li>
+      </ul>
+    </div>
+    <div class="demo-grid">
+      <div class="card">
+        <div class="field">
+          <span data-i18n="demo.allowTitle">Daftar izin (satu per baris)</span>
+          <textarea id="demo-allow" spellcheck="false">ibnu
+kopikilo.id
+6281234567890</textarea>
+        </div>
+        <div class="field" style="margin-top:14px">
+          <span data-i18n="demo.nameTitle">Nama chat yang masuk</span>
+          <input id="demo-name" type="text" value="IBNU - Community" autocomplete="off">
+        </div>
+        <p class="verdict" id="demo-verdict" aria-live="polite"><span class="dot"></span><span id="demo-verdict-text"></span></p>
+      </div>
+      <div class="card">
+        <div class="field">
+          <span data-i18n="demo.hoursTitle">Jam balas</span>
+          <div style="display:flex;gap:10px">
+            <input id="demo-start" type="time" value="21:00" aria-label="start">
+            <input id="demo-end" type="time" value="07:00" aria-label="end">
+          </div>
+        </div>
+        <div class="hours" style="margin-top:14px">
+          <div class="hours-bar" id="demo-bar"><span class="hours-now" id="demo-now"></span></div>
+          <div class="hours-scale"><span>00</span><span>06</span><span>12</span><span>18</span><span>24</span></div>
+          <p class="verdict" id="demo-hours-verdict" aria-live="polite"><span class="dot"></span><span id="demo-hours-text"></span></p>
+        </div>
+        <div class="statusline" id="demo-status" style="margin-top:14px"><span class="pulse"></span><span id="demo-status-text"></span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel" id="panel-jadwal" role="tabpanel" aria-labelledby="tab-jadwal" tabindex="0" hidden>
+    <div>
+      <h3 data-i18n="sched.title">Kirim sendiri, sekali atau terus</h3>
+      <ul>
+        <li><b data-i18n="sched.f1t">Enam pola</b><span data-i18n="sched.f1b">Sekali, harian, mingguan (pilih hari), bulanan (tanggal yang sama, otomatis menyesuaikan bulan pendek), dan tahunan.</span></li>
+        <li><b data-i18n="sched.f2t">Tidak saling berebut</b><span data-i18n="sched.f2b">AFK dan jadwal berbagi satu komposer: yang sedang mengirim didahulukan, yang lain menunggu giliran.</span></li>
+        <li><b data-i18n="sched.f3t">Pengiriman dari profil</b><span data-i18n="sched.f3b">Setiap jadwal punya asal pengirim, jadi pesan personal tetap bisa terpisah dari nomor kantor.</span></li>
+      </ul>
+    </div>
+    <figure class="panel-visual">
+      <img src="assets/menu.png" width="640" height="951" alt="Panel pengaturan WAtchful dengan kartu AFK" loading="lazy">
+      <figcaption data-i18n="sched.cap">Panel pengaturan: AFK, jadwal, dan jatah kirim berada di Automation.</figcaption>
+    </figure>
+  </div>
+
+  <div class="panel" id="panel-quick" role="tabpanel" aria-labelledby="tab-quick" tabindex="0" hidden>
+    <div>
+      <h3 data-i18n="quick.title">Balasan yang berulang, tanpa mengetik ulang</h3>
+      <ul>
+        <li><b data-i18n="quick.f1t">Pintasan slash</b><span data-i18n="quick.f1b">Ketik /trigger lalu Spasi di chat mana pun untuk memperluas templat, dikelola per profil.</span></li>
+        <li><b data-i18n="quick.f2t">Variabel</b><span data-i18n="quick.f2b">{name}, {date}, dan {time} terisi otomatis sesuai konteks.</span></li>
+        <li><b data-i18n="quick.f3t">Aman dari ketikan hilang</b><span data-i18n="quick.f3b">Ekspansi memakai jalur input editor sendiri dengan cadangan beberapa langkah; kegagalan melaporkan penyebabnya, bukan menelan teks.</span></li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="field">
+        <span data-i18n="quick.sample">Contoh pesan</span>
+        <textarea id="quick-demo" rows="4" spellcheck="false">Halo {name}, terima kasih sudah menghubungi saya.</textarea>
+      </div>
+      <p class="hint" id="quick-preview" style="margin-top:10px"></p>
+    </div>
+  </div>
+
+  <div class="panel" id="panel-preview" role="tabpanel" aria-labelledby="tab-preview" tabindex="0" hidden>
+    <div>
+      <h3 data-i18n="prev.title">Dokumen dibuka tanpa mengorbankan chat</h3>
+      <ul>
+        <li><b data-i18n="prev.f1t">Pratinjau PDF dan Office</b><span data-i18n="prev.f1b">Buka di dalam jendela dulu; simpan hanya setelah Anda memutuskan.</span></li>
+        <li><b data-i18n="prev.f2t">Gulir mulus</b><span data-i18n="prev.f2b">Overlay datar dan lapisan yang dipromosikan membuat pratinjau seluler seperti penampil bawaan.</span></li>
+        <li><b data-i18n="prev.f3t">Tanpa duplikat</b><span data-i18n="prev.f3b">Unduhan dicocokkan lewat isi berkas (SHA-256), jadi berkas sama tidak menumpuk di folder.</span></li>
+      </ul>
+    </div>
+    <div class="card">
+      <p style="margin-bottom:8px"><b data-i18n="prev.noteT">Catatan rilis terbaru</b></p>
+      <p class="muted small" style="margin:0" data-i18n="prev.noteB">Semua perbaikan ini sudah ada di v2.0.14 — bukan Vaporware.</p>
+    </div>
+  </div>
+
+  <div class="panel" id="panel-profil" role="tabpanel" aria-labelledby="tab-profil" tabindex="0" hidden>
+    <div>
+      <h3 data-i18n="prof.title">Banyak akun, satu jendela</h3>
+      <ul>
+        <li><b data-i18n="prof.f1t">Tab per profil</b><span data-i18n="prof.f1b">Setiap profil punya folder data sendiri sehingga satu akun tidak keluar dari akun lain.</span></li>
+        <li><b data-i18n="prof.f2t">Hemat daya</b><span data-i18n="prof.f2b">Tab tersembunyi ditangguhkan lalu dihibernasi; renderer aktif didaur ulang berkala.</span></li>
+        <li><b data-i18n="prof.f3t">Ganti nama langsung</b><span data-i18n="prof.f3b">Profil aktif bisa diganti namanya tanpa menutup apa pun; tab dan daftar ikut.</span></li>
+      </ul>
+    </div>
+    <div class="card">
+      <p style="margin:0" class="muted" data-i18n="prof.note">Direct Chat punya tombol sendiri di strip judul, juga tersedia lewat Ctrl/Cmd+Shift+C, sehingga nomor baru bisa dikunci tanpa disimpan ke kontak.</p>
+    </div>
+  </div>
+
+  <div class="panel" id="panel-privasi" role="tabpanel" aria-labelledby="tab-privasi" tabindex="0" hidden>
+    <div>
+      <h3 data-i18n="priv.title">Data tetap di mesin Anda</h3>
+      <ul>
+        <li><b data-i18n="priv.f1t">Mode privasi</b><span data-i18n="priv.f1b">Menyamar nama kontak, isi baris chat, dan tautan di dalam gelembung pesan.</span></li>
+        <li><b data-i18n="priv.f2t">Lokal</b><span data-i18n="priv.f2b">Pengaturan, daftar profil, dan log tinggal di folder data aplikasi; tidak ada yang diunggah otomatis.</span></li>
+        <li><b data-i18n="priv.f3t">Laporan manual</b><span data-i18n="priv.f3b">Tombol Report hanya membuka isu GitHub yang sudah terisi — Anda yang memutuskan mengirim.</span></li>
+      </ul>
+    </div>
+    <figure class="panel-visual">
+      <img src="assets/menu.png" width="640" height="951" alt="Panel pengaturan WAtchful" loading="lazy">
+      <figcaption data-i18n="priv.cap">Semua sakelar keamanan ada di tab Privacy dan Notifications.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="wrap section" id="afk">
+  <div class="section-head">
+    <div class="eyebrow" data-i18n="afksec.eyebrow">AFK, tapi tetap terkendali</div>
+    <h2 data-i18n="afksec.title">Aturan balasan Anda sendiri, bukan tebakan.</h2>
+    <p class="muted" data-i18n="afksec.lead">Dua slur yang menjalankan semuanya: jam boleh membalas, dan siapa yang boleh dibalas. Keduanya murni, transparan, dan bisa diuji tanpa menunggu pesan masuk.</p>
+  </div>
+  <div class="demo-grid">
+    <div class="card">
+      <h3 data-i18n="afksec.rulesT">Cara pencocokan</h3>
+      <ul class="muted" style="display:grid;gap:9px;padding:0;margin:0">
+        <li data-i18n="rule1">Entri berhuruf cocok sebagian, tanpa memandang huruf besar-kecil.</li>
+        <li data-i18n="rule2">Entri angka dicocokkan per digit, minimal 8 digit, dengan satu awalan +62 atau 0 diabaikan.</li>
+        <li data-i18n="rule3">Daftar kosong berarti tidak ada yang dibalas — bukan berarti semua.</li>
+        <li data-i18n="rule4">Chat di luar daftar dilewati sebelum diklik, jadi tidak pernah terbuka tanpa alasan.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3 data-i18n="afksec.statusT">Contoh baris status</h3>
+      <div class="statusline" style="margin-bottom:10px"><span class="pulse"></span><span class="mono" data-i18n="st1">armed — akan membalas chat belum dibaca berikutnya</span></div>
+      <div class="statusline is-idle" style="margin-bottom:10px"><span class="pulse"></span><span class="mono" data-i18n="st2">idle — chat belum dibaca di luar daftar izin (3 terdaftar)</span></div>
+      <div class="statusline is-idle" style="margin-bottom:10px"><span class="pulse"></span><span class="mono" data-i18n="st3">idle — di luar jam balas (21:00–07:00)</span></div>
+      <div class="statusline is-idle"><span class="pulse"></span><span class="mono" data-i18n="st4">jeda — panel pengaturan terbuka (tutup untuk lanjut)</span></div>
+    </div>
+  </div>
+</section>
+
+<section class="wrap section" id="jadwal">
+  <div class="section-head">
+    <div class="eyebrow" data-i18n="shortcut.eyebrow">Pintasan</div>
+    <h2 data-i18n="shortcut.title">Yang sering dipakai, satu ketukan</h2>
+  </div>
+  <div class="shortcuts">
+    <div class="shortcut"><kbd id="kbd-mod">Ctrl</kbd><span data-i18n="sc.settings">Buka pengaturan</span></div>
+    <div class="shortcut"><kbd id="kbd-mod2">Ctrl</kbd> <kbd>Shift C</kbd><span data-i18n="sc.direct">Direct Chat ke nomor baru</span></div>
+    <div class="shortcut"><kbd>/trigger</kbd> <kbd>Space</kbd><span data-i18n="sc.quick">Expand Quick Reply</span></div>
+    <div class="shortcut"><kbd data-i18n="sc.typeKey">ketik</kbd><span data-i18n="sc.typeHint">Balasan manual mematikan AFK sementara itu</span></div>
+  </div>
+</section>
+
+<section class="wrap section" id="privasi">
+  <div class="section-head">
+    <div class="eyebrow" data-i18n="faq.eyebrow">Pertanyaan umum</div>
+    <h2 data-i18n="faq.title">Sebelum Anda mengunduh</h2>
+  </div>
+  <div class="faq">
+    <details>
+      <summary data-i18n="q1t">Apakah chat saya dikirim ke server?</summary>
+      <p data-i18n="q1b">Tidak. WAtchful memakai mesin web bawaan sistem dan tidak punya server analitik atau relay pesan. Pemeriksaan pembaruan hanya contacting GitHub, tanpa isi chat.</p>
+    </details>
+    <details>
+      <summary data-i18n="q2t">Apakah harus punya akun WhatsApp Business?</summary>
+      <p data-i18n="q2b">Tidak. Login biasa seperti di WhatsApp Web, per profil. WAtchful hanya membungkusnya jadi jendela desktop.</p>
+    </details>
+    <details>
+      <summary data-i18n="q3t">Bagaimana cara pembaruannya?</summary>
+      <p data-i18n="q3b">WAtchful memeriksa rilis baru segera setelah mulai dan setiap 4 jam, lalu mengunduh, memasang, dan memulai ulang dirinya sendiri — Anda hanya menyetujui banner. Kalau tidak suka, unduh manual dari halaman ini.</p>
+    </details>
+    <details>
+      <summary data-i18n="q4t">Bisakah beberapa akun jalan bersamaan?</summary>
+      <p data-i18n="q4b">Bisa. Setiap profil punya tab sendiri dengan folder data terisolasi; tab tersembunyi otomatis ditangguhkan agar hemat CPU dan RAM.</p>
+    </details>
+    <details>
+      <summary data-i18n="q5t">Apa arti "hanya balas daftar"?</summary>
+      <p data-i18n="q5b">Fitur AFK punya daftar izin: isi nama atau nomor chat yang boleh dibalas otomatis. Yang tidak ada di daftar dilewati tanpa dibuka, dan tercatat di log AFK sebagai skipped.</p>
+    </details>
+  </div>
+</section>
+
+<section class="wrap section" id="unduh">
+  <div class="section-head">
+    <div class="eyebrow" data-i18n="dl.eyebrow">Unduhan</div>
+    <h2 data-i18n="dl.title">Pilih build yang sesuai</h2>
+    <p class="muted" data-i18n="dl.lead">Deteksi platform di atas sudah memilih yang tepat. Semua build tersedia manual di bawah ini.</p>
+  </div>
+  <div class="download-grid">
+    <article class="platform">
+      <span class="tag">Universal</span>
+      <h3>macOS</h3>
+      <p data-i18n="dl.mac">Apple Silicon dan Intel, dipasang lewat DMG.</p>
+      <div class="links">
+        <a href="https://github.com/latiefahmad/WAtchful/releases/latest/download/WAtchful-macOS-Universal.dmg" data-i18n="dl.dmg">DMG ↗</a>
+        <a href="https://github.com/latiefahmad/WAtchful/releases/latest/download/WAtchful-macOS-Universal.zip" data-i18n="dl.zip">ZIP ↗</a>
+      </div>
+    </article>
+    <article class="platform">
+      <span class="tag">x64</span>
+      <h3>Windows</h3>
+      <p data-i18n="dl.win">Windows 10/11, butuh WebView2 (umumnya sudah terpasang).</p>
+      <div class="links">
+        <a href="https://github.com/latiefahmad/WAtchful/releases/latest/download/WAtchful.exe" data-i18n="dl.exe">EXE ↗</a>
+        <a href="https://github.com/latiefahmad/WAtchful/releases/latest/download/WAtchful-Windows-x64.zip" data-i18n="dl.zip">ZIP ↗</a>
+      </div>
+    </article>
+    <article class="platform">
+      <span class="tag">x64</span>
+      <h3>Linux</h3>
+      <p data-i18n="dl.lin">Debian/Ubuntu, Fedora/RHEL, atau arsip portabel.</p>
+      <div class="links">
+        <a href="https://github.com/latiefahmad/WAtchful/releases/latest/download/WAtchful-Linux-amd64.deb" data-i18n="dl.deb">DEB ↗</a>
+        <a href="https://github.com/latiefahmad/WAtchful/releases/latest/download/WAtchful-Linux-x64.tar.gz" data-i18n="dl.tar">tar.gz ↗</a>
+      </div>
+    </article>
+    <article class="platform">
+      <span class="tag">arm64</span>
+      <h3>Linux ARM64</h3>
+      <p data-i18n="dl.arm">Paket DEB atau arsip portabel untuk mesin ARM64.</p>
+      <div class="links">
+        <a href="https://github.com/latiefahmad/WAtchful/releases/latest/download/WAtchful-Linux-arm64.deb" data-i18n="dl.deb">DEB ↗</a>
+        <a href="https://github.com/latiefahmad/WAtchful/releases/latest/download/WAtchful-Linux-arm64.tar.gz" data-i18n="dl.tar">tar.gz ↗</a>
+      </div>
+    </article>
+  </div>
+
+  <div class="card support" style="margin-top:16px">
+    <div>
+      <h3 data-i18n="support.title">Temukan aplikasi ini berguna?</h3>
+      <p class="muted" style="margin:0" data-i18n="support.body">WAtchful gratis dan sumber terbuka. Kalau Anda membantu, tombol Donate di strip judul — atau klik di sini — membuka Saweria.</p>
+    </div>
+    <a class="btn btn-primary" href="https://saweria.co/latiefahmad" rel="noopener" data-i18n="support.cta">Donate ↗</a>
+  </div>
+</section>
+
+<footer class="wrap footer">
+  <span data-i18n="foot.left">WAtchful adalah aplikasi independen dan tidak berafiliasi dengan Meta.</span>
+  <span class="mono">MIT License · <span id="foot-version">v2.0.14</span></span>
+</footer>
+
+<div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-label="Screenshot">
+  <button type="button" id="lightbox-close" aria-label="Close">✕</button>
+  <img id="lightbox-img" src="assets/app-dark.png" alt="">
+</div>
+
+<button class="icon-btn to-top" id="to-top" type="button" aria-label="Top">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"></path></svg>
+</button>
+
+<script src="app.js"></script>
 </body>
 </html>
